@@ -1,0 +1,12 @@
+FROM aflplusplus/aflplusplus:latest
+
+# Debugging tools for crash triage and analysis.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gdb \
+      ltrace \
+      strace \
+      binutils \
+      tmux \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

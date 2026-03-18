@@ -1,7 +1,8 @@
 PYTHON_VERSION ?= 3.14
 PYTHON_TAG     ?= v$(PYTHON_VERSION).0a1
 PYTHON_SRC      = python
-PREFIX          = $(CURDIR)/build/install
+DIST_DIR       ?= dist/main
+PREFIX          = $(CURDIR)/$(DIST_DIR)/install
 TESTCASES_DIR   = testcases
 OUTPUT_DIR      = output
 DICT_FILE       = dicts/python.dict
@@ -18,8 +19,8 @@ PYTHON_CONFIG  = $(PREFIX)/bin/python3-config
 PYTHON_CFLAGS  = $(shell $(PYTHON_CONFIG) --includes 2>/dev/null)
 PYTHON_LDFLAGS = $(shell $(PYTHON_CONFIG) --ldflags --embed 2>/dev/null)
 
-HARNESS        = build/fuzz_python
-HARNESS_CMPLOG = build/fuzz_python_cmplog
+HARNESS        = $(DIST_DIR)/fuzz_python
+HARNESS_CMPLOG = $(DIST_DIR)/fuzz_python_cmplog
 
 .PHONY: all build-python harness harness-cmplog \
         fuzz fuzz-multi status tmin clean distclean
@@ -33,22 +34,23 @@ python:
 
 # --- Build Python ---
 $(PREFIX)/lib/python$(PYTHON_VERSION): | python
-	mkdir -p build
+	mkdir -p $(DIST_DIR)
 	cd python && \
 	  CC=$(AFL_CC) CFLAGS="-O2 -g" \
+	  ax_cv_c_float_words_bigendian=no \
 	  ./configure \
 	    --prefix=$(PREFIX) \
 	    --disable-shared \
 	    --without-pymalloc \
-	    2>&1 | tee $(CURDIR)/build/configure.log
-	$(MAKE) -C python -j$(NPROC) 2>&1 | tee build/build.log
-	$(MAKE) -C python install     2>&1 | tee build/install.log
+	    2>&1 | tee $(CURDIR)/$(DIST_DIR)/configure.log
+	$(MAKE) -C python -j$(NPROC) 2>&1 | tee $(DIST_DIR)/build.log
+	$(MAKE) -C python install     2>&1 | tee $(DIST_DIR)/install.log
 
 build-python: $(PREFIX)/lib/python$(PYTHON_VERSION)
 
 # --- Harness ---
 $(HARNESS): harness/fuzz_python.c build-python
-	mkdir -p build
+	mkdir -p $(DIST_DIR)
 	$(AFL_CC) -O2 -g \
 	  $(PYTHON_CFLAGS) \
 	  harness/fuzz_python.c \
@@ -56,7 +58,7 @@ $(HARNESS): harness/fuzz_python.c build-python
 	  -o $@
 
 $(HARNESS_CMPLOG): harness/fuzz_python.c build-python
-	mkdir -p build
+	mkdir -p $(DIST_DIR)
 	AFL_LLVM_CMPLOG=1 $(AFL_CC) -O2 -g \
 	  $(PYTHON_CFLAGS) \
 	  harness/fuzz_python.c \
@@ -105,7 +107,7 @@ $(OUTPUT_DIR)/tmin:
 	mkdir -p $@
 
 clean:
-	rm -rf build
+	rm -rf dist/main
 
 distclean: clean
-	rm -rf python output
+	rm -rf dist python output

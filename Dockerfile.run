@@ -1,0 +1,20 @@
+FROM aflplusplus/aflplusplus:latest
+
+# gosu: clean privilege drop from root entrypoint to fuzzer user
+# curl: used to install uv
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gosu \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv: runs run.py and manages its dependencies
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/bin sh
+
+# Non-root user that AFL++ and the harness run as
+RUN groupadd -r fuzzer && useradd -r -g fuzzer -s /sbin/nologin -M fuzzer
+RUN mkdir -p /home/fuzzer && chown fuzzer:fuzzer /home/fuzzer
+
+COPY entrypoint.sh /entrypoint.sh
+
+WORKDIR /src
+ENTRYPOINT ["/entrypoint.sh"]

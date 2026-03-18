@@ -1,10 +1,9 @@
 FROM aflplusplus/aflplusplus:latest
 
-# tmux: needed for multi-worker mode (-j > 1)
-# *-dev libs: needed for a full CPython build (base image has the runtime
-# libs but not the headers/static archives required at compile time)
+# Dev libs required to compile CPython from source.
+# Also needs gcc for the nocorelimit.so shim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux \
+      gcc \
       libssl-dev \
       libbz2-dev \
       libreadline-dev \
