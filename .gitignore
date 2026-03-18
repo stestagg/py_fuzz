@@ -4,3 +4,4 @@ output/
 testcases/local/
 *.pyc
 __pycache__/
+dist/
