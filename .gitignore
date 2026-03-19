@@ -5,3 +5,12 @@ testcases/local/
 *.pyc
 __pycache__/
 dist/
+projects/*/cpython/
+projects/*/dist/
+projects/*/outputs/
+projects/*/cores/
+projects/*/analysis/
+projects/*/logs/
+projects/*/report/
+projects/*/dlopen_files.txt
+.venv/

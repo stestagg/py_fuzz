@@ -14,7 +14,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/bin sh
 RUN groupadd -r fuzzer && useradd -r -g fuzzer -s /sbin/nologin -M fuzzer
 RUN mkdir -p /home/fuzzer && chown fuzzer:fuzzer /home/fuzzer
 
-COPY entrypoint.sh /entrypoint.sh
+COPY image/entrypoint.sh /entrypoint.sh
 
 WORKDIR /src
 ENTRYPOINT ["/entrypoint.sh"]
