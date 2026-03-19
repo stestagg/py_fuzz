@@ -1,0 +1,10 @@
+[project]
+name = "pyfuzz"
+version = "0.1.0"
+description = "Unified tooling for building, running, and analyzing py-fuzz projects"
+requires-python = ">=3.11"
+dependencies = [
+  "click>=8.1,<9",
+  "rich>=13,<14",
+  "textual>=0.81,<1",
+]
