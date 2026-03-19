@@ -7,7 +7,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROJECTS_DIR = REPO_ROOT / "projects"
-LEGACY_TESTCASE_CANDIDATES = [REPO_ROOT / "testcases", REPO_ROOT / "testcases.broad", REPO_ROOT / "testcases.expat"]
 
 
 @dataclass
@@ -16,7 +15,6 @@ class ProjectConfig:
     env_id: str
     pr_id: int | None = None
     asan: bool = False
-    testcase_dir: str = "testcases"
 
     @property
     def display_target(self) -> str:
@@ -34,6 +32,7 @@ class Project:
         self.analysis_dir = root / "analysis"
         self.logs_dir = root / "logs"
         self.reports_dir = root / "report"
+        self.inputs_dir = root / "inputs"
         self.trace_file = root / "dlopen_files.txt"
 
     @property
@@ -49,14 +48,8 @@ class Project:
         return self.root / "project.json"
 
     def ensure_layout(self) -> None:
-        for path in [self.root, self.dist_dir, self.outputs_dir, self.cores_dir, self.analysis_dir, self.logs_dir, self.reports_dir]:
+        for path in [self.root, self.dist_dir, self.outputs_dir, self.cores_dir, self.analysis_dir, self.logs_dir, self.reports_dir, self.inputs_dir]:
             path.mkdir(parents=True, exist_ok=True)
-
-    def testcase_path(self) -> Path:
-        candidate = REPO_ROOT / self.config.testcase_dir
-        if candidate.exists():
-            return candidate
-        raise FileNotFoundError(f"Testcase path does not exist: {candidate}")
 
 
 def default_env_id(name: str, pr_id: int | None) -> str:
@@ -87,6 +80,7 @@ def load_project(name: str) -> Project:
     if not config_path.exists():
         raise FileNotFoundError(f"Unknown project '{name}'. Create it first with ./pyfuzz create {name}")
     data = json.loads(config_path.read_text())
+    data.pop("testcase_dir", None)
     project = Project(root, ProjectConfig(**data))
     project.ensure_layout()
     return project

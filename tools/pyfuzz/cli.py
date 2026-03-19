@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import click
 
-from .console import detail, run, step, success
+from .console import detail, run, step, success, warn
 from .docker import BUILD_IMAGE, DEBUG_IMAGE, RUN_IMAGE, ensure_image, ensure_tool
 from .project import ProjectConfig, default_env_id, load_project, save_project
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DICT_FILE = REPO_ROOT / "dicts" / "python.dict"
+DICT_FILE = REPO_ROOT / "helpers" / "python.dict"
 PYTHON_REPO = "https://github.com/python/cpython.git"
 
 
@@ -60,16 +61,14 @@ def cli() -> None:
 @click.option("--pr", type=int)
 @click.option("--env-id")
 @click.option("--asan", is_flag=True)
-@click.option("--testcases", default="testcases", show_default=True, help="Repository-relative testcase directory or group")
-def create(name: str, pr: int | None, env_id: str | None, asan: bool, testcases: str) -> None:
+def create(name: str, pr: int | None, env_id: str | None, asan: bool) -> None:
     """Create an isolated pyfuzz project."""
     resolved_env_id = env_id or default_env_id(name, pr)
-    project = save_project(ProjectConfig(name=name, env_id=resolved_env_id, pr_id=pr, asan=asan, testcase_dir=testcases))
+    project = save_project(ProjectConfig(name=name, env_id=resolved_env_id, pr_id=pr, asan=asan))
     success(f"Created project {project.config.name}")
     detail("root", str(project.root))
     detail("env_id", project.config.env_id)
     detail("target", project.config.display_target)
-    detail("testcases", project.config.testcase_dir)
 
 
 @cli.command()
@@ -112,7 +111,8 @@ def run_cmd(project_name: str, jobs: int, timeout: int | None, build_image: bool
     if not project.harness_path.exists():
         raise click.ClickException(f"Project {project.config.name} is not built yet. Run ./pyfuzz build {project.config.name}")
     ensure_image(RUN_IMAGE, "Dockerfile.run", force=build_image)
-    testcase_path = project.testcase_path()
+    if not any(project.inputs_dir.iterdir()):
+        warn(f"Warning: inputs dir is empty ({project.inputs_dir}). Add testcases with: ./pyfuzz tests {project.config.name} add <name>")
     project.outputs_dir.mkdir(parents=True, exist_ok=True)
     cpu_args = ["--cpus", str(jobs)] if jobs > 1 else []
     extra_env: list[str] = []
@@ -125,7 +125,7 @@ def run_cmd(project_name: str, jobs: int, timeout: int | None, build_image: bool
         *cpu_args,
         "-v", f"{REPO_ROOT}:/repo",
         "-v", f"{project.root}:/project",
-        "-v", f"{testcase_path}:/testcases:ro",
+        "-v", f"{project.inputs_dir}:/testcases:ro",
         "-v", f"{DICT_FILE}:/dicts/python.dict:ro",
         "-e", "PROJECT_ROOT=/project",
         "-e", "TESTCASES_DIR=/testcases",
@@ -143,6 +143,85 @@ def run_cmd(project_name: str, jobs: int, timeout: int | None, build_image: bool
             docker_cmd += ["--timeout", str(timeout)]
     step(f"Running project {project.config.name}")
     run(docker_cmd)
+
+
+TESTCASES_ROOT = REPO_ROOT / "testcases"
+
+
+@cli.group(name="tests")
+@click.argument("project_name")
+@click.pass_context
+def tests_group(ctx: click.Context, project_name: str) -> None:
+    """Manage testcase inputs for a project."""
+    ctx.ensure_object(dict)
+    ctx.obj["project"] = load_project(project_name)
+
+
+def _resolve_names(name: str | None, all_: bool, source_root: Path) -> list[str]:
+    if all_:
+        return [p.name for p in sorted(source_root.iterdir()) if p.is_dir()]
+    if name is None:
+        raise click.UsageError("Provide <name> or --all")
+    return [name]
+
+
+@tests_group.command(name="add")
+@click.argument("name", required=False)
+@click.option("--all", "all_", is_flag=True)
+@click.pass_context
+def tests_add(ctx: click.Context, name: str | None, all_: bool) -> None:
+    """Copy testcases/<name>/ into the project inputs dir."""
+    project = ctx.obj["project"]
+    names = _resolve_names(name, all_, TESTCASES_ROOT)
+    for n in names:
+        src = TESTCASES_ROOT / n
+        dest = project.inputs_dir / n
+        if not src.exists():
+            raise click.ClickException(f"Source does not exist: {src}")
+        if dest.exists():
+            raise click.ClickException(f"Destination already exists: {dest}. Use sync to overwrite.")
+        shutil.copytree(src, dest)
+        success(f"Added {n}")
+
+
+@tests_group.command(name="remove")
+@click.argument("name", required=False)
+@click.option("--all", "all_", is_flag=True)
+@click.pass_context
+def tests_remove(ctx: click.Context, name: str | None, all_: bool) -> None:
+    """Remove testcase inputs from the project inputs dir."""
+    project = ctx.obj["project"]
+    if all_:
+        names = [p.name for p in sorted(project.inputs_dir.iterdir()) if p.is_dir()]
+    else:
+        if name is None:
+            raise click.UsageError("Provide <name> or --all")
+        names = [name]
+    for n in names:
+        dest = project.inputs_dir / n
+        if not dest.exists():
+            raise click.ClickException(f"Not present: {dest}")
+        shutil.rmtree(dest)
+        success(f"Removed {n}")
+
+
+@tests_group.command(name="sync")
+@click.argument("name", required=False)
+@click.option("--all", "all_", is_flag=True)
+@click.pass_context
+def tests_sync(ctx: click.Context, name: str | None, all_: bool) -> None:
+    """Re-sync testcases/<name>/ into the project inputs dir (clean copy)."""
+    project = ctx.obj["project"]
+    names = _resolve_names(name, all_, TESTCASES_ROOT)
+    for n in names:
+        src = TESTCASES_ROOT / n
+        dest = project.inputs_dir / n
+        if not src.exists():
+            raise click.ClickException(f"Source does not exist: {src}")
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest)
+        success(f"Synced {n}")
 
 
 @cli.command(name="analyze")
@@ -184,9 +263,8 @@ def tui(project_name: str) -> None:
     run(["uv", "run", "python", "-m", "tools.pyfuzz.tui", "--project-root", str(project.root)], cwd=REPO_ROOT)
 
 
-def main() -> int:
-    cli.main(standalone_mode=False)
-    return 0
+def main() -> None:
+    cli.main()
 
 
 if __name__ == "__main__":

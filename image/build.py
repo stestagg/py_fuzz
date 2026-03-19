@@ -25,7 +25,7 @@ def main(force: bool) -> None:
     source_dir = project / "cpython"
     dist_dir = project / "dist"
     prefix = dist_dir / "install"
-    harness_src = repo / "harness" / "fuzz_python.c"
+    harness_src = repo / "helpers" / "fuzz_python.c"
     shim_src = repo / "helpers" / "nocorelimit.c"
     trace_src = repo / "helpers" / "trace_dlopen.c"
     harness = dist_dir / "fuzz_python"

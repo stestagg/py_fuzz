@@ -1,0 +1,7 @@
+{
+  "asan": false,
+  "env_id": "main-heisen",
+  "name": "main-heisen",
+  "pr_id": null,
+  "testcase_dir": "testcases"
+}
