@@ -1,0 +1,1 @@
+import binascii; binascii.a2b_uu("\u0100")

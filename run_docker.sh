@@ -27,6 +27,12 @@ Options:
       --shell           Launch an interactive bash shell instead of fuzzing
       --test-crash      Set FUZZ_TEST_CRASH=1; harness aborts on input 'fuzztestcrash'
                         (use to verify end-to-end crash detection is working)
+      --trace-dlopen    Replay all testcases through fuzz_python with an
+                        LD_PRELOAD dlopen hook; writes dlopen_files.txt to the
+                        project root
+                        afl_preloads.txt at the project root lists container
+                        paths of .so files to inject via AFL_PRELOAD (one per
+                        line; # comments and blank lines ignored)
   -h, --help            Show this help and exit
 
 Examples:
@@ -43,6 +49,7 @@ AFL_WORKERS=1
 FORCE_IMAGE=0
 SHELL_MODE=0
 TEST_CRASH=0
+TRACE_DLOPEN=0
 FORWARD_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -55,6 +62,8 @@ while [[ $# -gt 0 ]]; do
       SHELL_MODE=1; shift ;;
     --test-crash)
       TEST_CRASH=1; shift ;;
+    --trace-dlopen)
+      TRACE_DLOPEN=1; shift ;;
     -o|--output|-T|--timeout)
       FORWARD_ARGS+=("$1" "$2"); shift 2 ;;
     -j[0-9]*)
@@ -90,6 +99,11 @@ DIST_ID="${PR_ID:-main}"
   exit 1
 }
 
+# Auto-detect ASAN build from marker file left by build.sh
+ASAN=0
+[[ -f "$SCRIPT_DIR/dist/${DIST_ID}/.asan" ]] && ASAN=1
+[[ "$ASAN" -eq 1 ]] && echo "==> ASAN build detected (dist/${DIST_ID}/.asan)"
+
 # Ensure the output directory exists on the host before mounting it
 OUTPUT_DIR="$SCRIPT_DIR/output/${DIST_ID}"
 mkdir -p "$OUTPUT_DIR"
@@ -99,6 +113,34 @@ CPU_ARGS=()
 
 TEST_CRASH_ARGS=()
 [[ "$TEST_CRASH" -eq 1 ]] && TEST_CRASH_ARGS=(-e FUZZ_TEST_CRASH=1)
+
+ASAN_ARGS=()
+[[ "$ASAN" -eq 1 ]] && ASAN_ARGS=(
+  -e "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=0"
+  -e "AFL_USE_ASAN=1"
+)
+
+AFL_PRELOAD_ARGS=()
+if [[ -f "$SCRIPT_DIR/afl_preloads.txt" ]]; then
+  preload_val=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    preload_val="${preload_val:+${preload_val}:}${line}"
+  done < "$SCRIPT_DIR/afl_preloads.txt"
+  if [[ -n "$preload_val" ]]; then
+    AFL_PRELOAD_ARGS=(-e "AFL_PRELOAD=${preload_val}")
+    echo "==> AFL_PRELOAD: ${preload_val}"
+  fi
+fi
+
+TRACE_DLOPEN_ARGS=()
+if [[ "$TRACE_DLOPEN" -eq 1 ]]; then
+  touch "$SCRIPT_DIR/dlopen_files.txt"   # must exist for bind-mount
+  TRACE_DLOPEN_ARGS=(
+    -v "$SCRIPT_DIR/trace_inputs.sh:/src/trace_inputs.sh:ro"
+    -v "$SCRIPT_DIR/dlopen_files.txt:/dlopen_files.txt"
+  )
+fi
 
 # Mounts:
 #   dist/{id}  — read-only  (harness binaries; must not be corrupted)
@@ -123,11 +165,16 @@ DOCKER_COMMON=(
   -e TESTCASES_DIR=/testcases
   -e DICT_FILE=/dicts/python.dict
   "${TEST_CRASH_ARGS[@]+"${TEST_CRASH_ARGS[@]}"}"
+  "${ASAN_ARGS[@]+"${ASAN_ARGS[@]}"}"
+  "${TRACE_DLOPEN_ARGS[@]+"${TRACE_DLOPEN_ARGS[@]}"}"
+  "${AFL_PRELOAD_ARGS[@]+"${AFL_PRELOAD_ARGS[@]}"}"
   "$RUN_IMAGE"
 )
 
 if [[ "$SHELL_MODE" -eq 1 ]]; then
   "${DOCKER_COMMON[@]}" bash
+elif [[ "$TRACE_DLOPEN" -eq 1 ]]; then
+  "${DOCKER_COMMON[@]}" /src/trace_inputs.sh
 else
   "${DOCKER_COMMON[@]}" /src/run.py "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"
 fi

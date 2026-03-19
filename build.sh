@@ -26,15 +26,17 @@ Arguments:
                 before building.  Omit to build from the current python/ HEAD.
 
 Options:
+  --asan            Build with AddressSanitizer (outputs to dist/<id>-asan/)
   --force           Rebuild everything, even if outputs appear up to date
   --skip-checkout   Skip the 'gh pr checkout' step (use when the source tree
                     is already on the right branch, e.g. inside Docker)
   -h, --help        Show this help and exit
 
 Examples:
-  $(basename "$0")          # build from current HEAD -> dist/main/
-  $(basename "$0") 132345   # check out PR, build -> dist/132345/
-  $(basename "$0") --force  # force full rebuild
+  $(basename "$0")           # build from current HEAD -> dist/main/
+  $(basename "$0") 132345    # check out PR, build -> dist/132345/
+  $(basename "$0") --asan    # ASAN build -> dist/main/ + dist/main/.asan marker
+  $(basename "$0") --force   # force full rebuild
 EOF
 }
 
@@ -42,10 +44,12 @@ EOF
 PR_ID=""
 FORCE=0
 SKIP_CHECKOUT=0
+ASAN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)        usage; exit 0 ;;
+    --asan)           ASAN=1; shift ;;
     --force)          FORCE=1; shift ;;
     --skip-checkout)  SKIP_CHECKOUT=1; shift ;;
     -*)               echo "Unknown option: $1" >&2; echo; usage >&2; exit 1 ;;
@@ -72,12 +76,28 @@ SHIM_SRC="${SCRIPT_DIR}/helpers/nocorelimit.c"
 HARNESS="${DIST_DIR}/fuzz_python"
 HARNESS_CMPLOG="${DIST_DIR}/fuzz_python_cmplog"
 SHIM_SO="${DIST_DIR}/nocorelimit.so"
+TRACE_SO="${DIST_DIR}/trace_dlopen.so"
+TRACE_SRC="${SCRIPT_DIR}/helpers/trace_dlopen.c"
 
 # ── Tooling ───────────────────────────────────────────────────────────────────
-AFL_CC="$(command -v afl-clang-lto  2>/dev/null || \
-          command -v afl-clang-fast 2>/dev/null || \
-          command -v afl-gcc-fast   2>/dev/null || \
-          echo afl-clang-fast)"
+# ASAN is incompatible with LTO; force afl-clang-fast when building with ASAN.
+if [[ "$ASAN" -eq 1 ]]; then
+  AFL_CC="$(command -v afl-clang-fast 2>/dev/null || echo afl-clang-fast)"
+else
+  AFL_CC="$(command -v afl-clang-lto  2>/dev/null || \
+            command -v afl-clang-fast 2>/dev/null || \
+            command -v afl-gcc-fast   2>/dev/null || \
+            echo afl-clang-fast)"
+fi
+
+EXTRA_CFLAGS=""
+EXTRA_ENV=""
+if [[ "$ASAN" -eq 1 ]]; then
+  EXTRA_CFLAGS="-fsanitize=address -fno-omit-frame-pointer"
+  # AFL_USE_ASAN=1: tells afl-clang-fast not to inject the auto-start forkserver
+  # constructor, which conflicts with ASAN's own early initialization.
+  EXTRA_ENV="AFL_USE_ASAN=1"
+fi
 NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 for cmd in make gcc "$AFL_CC"; do
@@ -100,18 +120,34 @@ needs_rebuild() {
 cd "$SCRIPT_DIR"
 mkdir -p "$DIST_DIR"
 
+# Drop or remove the ASAN marker so run_docker.sh can auto-detect.
+ASAN_MARKER="${DIST_DIR}/.asan"
+if [[ "$ASAN" -eq 1 ]]; then
+  touch "$ASAN_MARKER"
+else
+  rm -f "$ASAN_MARKER"
+fi
+
 # ── Ensure CPython source exists ──────────────────────────────────────────────
 if [[ ! -d "$PYTHON_SRC" ]]; then
   echo "==> Cloning CPython..."
   git clone --depth=1 https://github.com/python/cpython.git "$PYTHON_SRC"
 fi
 
-# ── PR checkout ───────────────────────────────────────────────────────────────
-if [[ -n "$PR_ID" ]] && [[ "$SKIP_CHECKOUT" -eq 0 ]]; then
-  command -v gh >/dev/null 2>&1 || { echo "gh is required for PR mode (or pass --skip-checkout)" >&2; exit 1; }
-  echo "==> Checking out PR #${PR_ID}..."
+# ── PR / branch checkout ──────────────────────────────────────────────────────
+if [[ "$SKIP_CHECKOUT" -eq 0 ]]; then
   cd "$PYTHON_SRC"
-  gh pr checkout "$PR_ID" --repo python/cpython
+  if [[ -n "$PR_ID" ]]; then
+    command -v gh >/dev/null 2>&1 || { echo "gh is required for PR mode (or pass --skip-checkout)" >&2; exit 1; }
+    echo "==> Checking out PR #${PR_ID}..."
+    gh pr checkout "$PR_ID" --repo python/cpython
+  else
+    echo "==> Resetting CPython to origin/main..."
+    git fetch origin main
+    git checkout main
+    git reset --hard origin/main
+  fi
+  git clean -fd
   cd "$SCRIPT_DIR"
 fi
 
@@ -119,7 +155,7 @@ fi
 if needs_rebuild "${PREFIX}/bin/python3"; then
   echo "==> Building instrumented CPython -> ${PREFIX}/"
   cd "$PYTHON_SRC"
-  CC="$AFL_CC" CFLAGS="-O2 -g" \
+  CC="$AFL_CC" CFLAGS="-O2 -g ${EXTRA_CFLAGS}" LDFLAGS="${EXTRA_CFLAGS}" ${EXTRA_ENV} \
     ax_cv_c_float_words_bigendian=no \
     ./configure \
       --prefix="$PREFIX" \
@@ -129,8 +165,8 @@ if needs_rebuild "${PREFIX}/bin/python3"; then
   # PYTHONPATH=Lib: the AFL-instrumented ./python can't find encodings when the
   # build system runs it to generate frozen modules (prefix not installed yet).
   # Pointing it at the in-tree Lib/ lets the partial interpreter bootstrap itself.
-  PYTHONPATH="$(pwd)/Lib" make -j"$NPROC" 2>&1 | tee "${DIST_DIR}/build.log"
-  make install     2>&1 | tee "${DIST_DIR}/install.log"
+  PYTHONPATH="$(pwd)/Lib" ${EXTRA_ENV} make -j"$NPROC" 2>&1 | tee "${DIST_DIR}/build.log"
+  ${EXTRA_ENV} make install 2>&1 | tee "${DIST_DIR}/install.log"
   cd "$SCRIPT_DIR"
 else
   echo "==> Python already built — skipping (--force to rebuild)"
@@ -142,11 +178,16 @@ PYTHON_CONFIG="${PREFIX}/bin/python3-config"
 PYTHON_CFLAGS="$("$PYTHON_CONFIG" --includes)"
 # shellcheck disable=SC2046
 PYTHON_LDFLAGS="$("$PYTHON_CONFIG" --ldflags --embed)"
+# Wrap -lpython* with --whole-archive so every object file in libpython.a is linked
+# into the harness binary. Combined with -export-dynamic this makes all Python symbols
+# (including those never called by the harness directly) visible to extension .so
+# modules that are dlopen'd at runtime.
+PYTHON_LDFLAGS_WA="$(echo "$PYTHON_LDFLAGS" | sed 's/-lpython[^ ]*/-Wl,--whole-archive & -Wl,--no-whole-archive/')"
 
 if needs_rebuild "$HARNESS" "$HARNESS_SRC" "$PYTHON_CONFIG"; then
   echo "==> Building harness -> ${HARNESS}"
   # shellcheck disable=SC2086
-  "$AFL_CC" -O2 -g $PYTHON_CFLAGS "$HARNESS_SRC" $PYTHON_LDFLAGS -o "$HARNESS"
+  ${EXTRA_ENV} "$AFL_CC" -O2 -g $EXTRA_CFLAGS $PYTHON_CFLAGS "$HARNESS_SRC" $PYTHON_LDFLAGS_WA -Wl,-export-dynamic -o "$HARNESS"
 else
   echo "==> Harness up to date — skipping"
 fi
@@ -154,7 +195,7 @@ fi
 if needs_rebuild "$HARNESS_CMPLOG" "$HARNESS_SRC" "$PYTHON_CONFIG"; then
   echo "==> Building cmplog harness -> ${HARNESS_CMPLOG}"
   # shellcheck disable=SC2086
-  AFL_LLVM_CMPLOG=1 "$AFL_CC" -O2 -g $PYTHON_CFLAGS "$HARNESS_SRC" $PYTHON_LDFLAGS -o "$HARNESS_CMPLOG"
+  ${EXTRA_ENV} AFL_LLVM_CMPLOG=1 "$AFL_CC" -O2 -g $EXTRA_CFLAGS $PYTHON_CFLAGS "$HARNESS_SRC" $PYTHON_LDFLAGS_WA -Wl,-export-dynamic -o "$HARNESS_CMPLOG"
 else
   echo "==> Cmplog harness up to date — skipping"
 fi
@@ -165,6 +206,14 @@ if needs_rebuild "$SHIM_SO" "$SHIM_SRC"; then
   gcc -shared -fPIC -o "$SHIM_SO" "$SHIM_SRC" -ldl
 else
   echo "==> Coredump shim up to date — skipping"
+fi
+
+# ── Build dlopen trace shim ───────────────────────────────────────────────────
+if needs_rebuild "$TRACE_SO" "$TRACE_SRC"; then
+  echo "==> Building dlopen trace shim -> ${TRACE_SO}"
+  gcc -shared -fPIC -o "$TRACE_SO" "$TRACE_SRC" -ldl
+else
+  echo "==> dlopen trace shim up to date — skipping"
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────

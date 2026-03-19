@@ -14,10 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 
+from rich.markup import escape
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.message import Message
-from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
+from textual.widgets import Footer, Header, Static, Tree
 from textual.containers import Horizontal, ScrollableContainer
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -76,17 +78,14 @@ def relative_age(mtime: float) -> str:
     return f"{int(age / 86400)}d ago"
 
 
-def crash_label(crash: Crash) -> str:
+def crash_leaf_label(crash: Crash) -> str:
     if crash.is_llm_analyzed:
-        indicator = "[[L]"
+        indicator = "[L]"
     elif crash.is_gdb_analyzed:
-        indicator = "[[✓]"
+        indicator = "[✓]"
     else:
-        indicator = "[[ ]"
-    return (
-        f"[cyan bold]{crash.pr_id}[/] "
-        f"{indicator} {crash.worker_id} {crash.name[:20]} {relative_age(crash.mtime)}"
-    )
+        indicator = "[ ]"
+    return f"{indicator} {escape(crash.worker_id)} {escape(crash.name[:20])} {relative_age(crash.mtime)}"
 
 
 def render_detail(crash: Crash | None, analyzing: str = "") -> str:
@@ -122,7 +121,11 @@ def render_detail(crash: Crash | None, analyzing: str = "") -> str:
 
         lines.append("=== GDB Output ===")
         if info_path.exists():
-            lines.append(info_path.read_text(errors="replace"))
+            gdb_output = info_path.read_text(errors="replace")
+            if len(gdb_output) > 30_000:
+                half = 15_000
+                gdb_output = gdb_output[:half] + "\n[.. content skipped ..]\n" + gdb_output[-half:]
+            lines.append(gdb_output)
         else:
             lines.append("(info.txt missing)")
 
@@ -146,9 +149,9 @@ def render_detail(crash: Crash | None, analyzing: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 class AnalysisDone(Message):
-    def __init__(self, pr_id: str) -> None:
+    def __init__(self, crash_key: str) -> None:
         super().__init__()
-        self.pr_id = pr_id
+        self.crash_key = crash_key
 
 
 class LLMAnalysisDone(Message):
@@ -189,17 +192,24 @@ class CrashBrowserApp(App):
         Binding("q", "quit", "Quit"),
         Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("r", "refresh", "Refresh"),
-        Binding("enter", "analyze", "Analyze"),
+        Binding("a", "analyze", "Analyze"),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
+        Binding("left", "collapse_node", "Collapse", show=False),
+        Binding("right", "expand_node", "Expand", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
         self._crashes: list[Crash] = []
-        self._index_map: list[int | None] = []  # list pos -> crash index, or None for headers
-        self._analyzing: set[str] = set()      # crash keys: GDB in progress
-        self._llm_analyzing: set[str] = set()  # crash keys: LLM in progress
+        self._analyzing: set[str] = set()
+        self._llm_analyzing: set[str] = set()
+        self._gdb_queue: list[Crash] = []
+        self._gdb_running: int = 0
+        self._gdb_max_concurrent: int = 3
+        # None means "expand all" (initial state); after first build, tracks which nodes are open
+        self._expanded_prs: set[str] | None = None   # pr_id strings
+        self._expanded_cats: set[str] | None = None  # "pr_id/cat" strings
 
     def _crash_key(self, crash: Crash) -> str:
         return f"{crash.pr_id}/{crash.worker_id}/{crash.name}"
@@ -208,7 +218,7 @@ class CrashBrowserApp(App):
         yield Header()
         with Horizontal():
             with ScrollableContainer(id="left-pane"):
-                yield ListView(id="crash-list")
+                yield Tree("Crashes", id="crash-tree")
             with ScrollableContainer(id="right-pane"):
                 yield Static("", id="detail")
         yield Static("", id="llm-status")
@@ -228,96 +238,115 @@ class CrashBrowserApp(App):
         except Exception:
             return None
 
-    def _build_list(self) -> tuple[list[ListItem], list[int | None]]:
-        unanalyzed = [i for i, c in enumerate(self._crashes) if not c.is_llm_analyzed]
-        categorized: dict[str, list[int]] = {}
+    def _save_tree_state(self) -> None:
+        """Capture current expand/collapse state before rebuilding."""
+        tree = self.query_one("#crash-tree", Tree)
+        self._expanded_prs = set()
+        self._expanded_cats = set()
+        for pr_node in tree.root.children:
+            if not isinstance(pr_node.data, str):
+                continue
+            pr_id = pr_node.data
+            if not pr_node.is_collapsed:
+                self._expanded_prs.add(pr_id)
+            for cat_node in pr_node.children:
+                if isinstance(cat_node.data, str) and not cat_node.is_collapsed:
+                    self._expanded_cats.add(cat_node.data)
+
+    def _build_tree(self) -> None:
+        tree = self.query_one("#crash-tree", Tree)
+        tree.clear()
+
+        # Group by pr_id
+        by_pr: dict[str, list[int]] = {}
         for i, crash in enumerate(self._crashes):
-            if crash.is_llm_analyzed:
-                cat = self._get_category(crash) or "unknown"
-                categorized.setdefault(cat, []).append(i)
+            by_pr.setdefault(crash.pr_id, []).append(i)
 
-        items: list[ListItem] = []
-        index_map: list[int | None] = []
+        for pr_id in sorted(by_pr.keys()):
+            expand_pr = self._expanded_prs is None or pr_id in self._expanded_prs
+            pr_node = tree.root.add(f"[cyan bold]{pr_id}[/]", data=pr_id, expand=expand_pr)
 
-        if unanalyzed:
-            items.append(ListItem(Label("[bold dim]Unanalyzed[/]"), disabled=True))
-            index_map.append(None)
-            for ci in unanalyzed:
-                items.append(ListItem(Label(crash_label(self._crashes[ci]))))
-                index_map.append(ci)
+            # Group by category within this pr
+            by_cat: dict[str, list[int]] = {}
+            for ci in by_pr[pr_id]:
+                crash = self._crashes[ci]
+                cat = self._get_category(crash) if crash.is_llm_analyzed else None
+                cat = cat or "unanalyzed"
+                by_cat.setdefault(cat, []).append(ci)
 
-        for cat in sorted(categorized.keys()):
-            items.append(ListItem(Label(f"[bold dim]{cat}[/]"), disabled=True))
-            index_map.append(None)
-            for ci in categorized[cat]:
-                items.append(ListItem(Label(crash_label(self._crashes[ci]))))
-                index_map.append(ci)
+            for cat in sorted(by_cat.keys()):
+                cat_key = f"{pr_id}/{cat}"
+                expand_cat = self._expanded_cats is None or cat_key in self._expanded_cats
+                cat_node = pr_node.add(f"[dim]{escape(cat)}[/]", data=cat_key, expand=expand_cat)
+                for ci in by_cat[cat]:
+                    crash = self._crashes[ci]
+                    cat_node.add_leaf(crash_leaf_label(crash), data=ci)
 
-        return items, index_map
+        tree.root.expand()
+
+    def _get_selected_crash(self) -> Crash | None:
+        tree = self.query_one("#crash-tree", Tree)
+        node = tree.cursor_node
+        if node is None or not isinstance(node.data, int):
+            return None
+        return self._crashes[node.data]
 
     def _selected_key(self) -> str | None:
-        """Return the crash key for the currently selected list item, if any."""
-        lv = self.query_one("#crash-list", ListView)
-        li = lv.index
-        if li is None or li >= len(self._index_map):
+        crash = self._get_selected_crash()
+        return self._crash_key(crash) if crash else None
+
+    def _find_node_for_key(self, key: str):
+        tree = self.query_one("#crash-tree", Tree)
+
+        def search(node):
+            if isinstance(node.data, int) and self._crash_key(self._crashes[node.data]) == key:
+                return node
+            for child in node.children:
+                result = search(child)
+                if result is not None:
+                    return result
             return None
-        ci = self._index_map[li]
-        return self._crash_key(self._crashes[ci]) if ci is not None else None
 
-    def _list_idx_for_key(self, key: str) -> int | None:
-        for li, ci in enumerate(self._index_map):
-            if ci is not None and self._crash_key(self._crashes[ci]) == key:
-                return li
-        return None
+        return search(tree.root)
 
-    def _first_crash_list_idx(self) -> int | None:
-        for li, ci in enumerate(self._index_map):
-            if ci is not None:
-                return li
-        return None
+    def _first_crash_node(self):
+        tree = self.query_one("#crash-tree", Tree)
+
+        def search(node):
+            if isinstance(node.data, int):
+                return node
+            for child in node.children:
+                result = search(child)
+                if result is not None:
+                    return result
+            return None
+
+        return search(tree.root)
 
     def _load_crashes(self) -> None:
         prev_key = self._selected_key()
+        if self._crashes:  # save state only after initial population
+            self._save_tree_state()
         self._crashes = discover_crashes()
-        items, self._index_map = self._build_list()
-        lv = self.query_one("#crash-list", ListView)
-        lv.clear()
-        for item in items:
-            lv.append(item)
-        new_li = (self._list_idx_for_key(prev_key) if prev_key else None) \
-                 or self._first_crash_list_idx()
-        if new_li is not None:
-            lv.index = new_li
-        self._update_detail(new_li)
+        self._build_tree()
+        target = (
+            self._find_node_for_key(prev_key) if prev_key else None
+        ) or self._first_crash_node()
+        if target is not None:
+            # Defer until after the tree finishes processing the rebuild;
+            # otherwise tree.clear()'s async cursor reset fires after our move.
+            self.call_after_refresh(self.query_one("#crash-tree", Tree).move_cursor, target)
+        self._update_detail()
 
     def _refresh_crashes(self) -> None:
-        new_crashes = discover_crashes()
-        new_keys = [self._crash_key(c) for c in new_crashes]
-        old_keys = [self._crash_key(c) for c in self._crashes]
-        if new_keys == old_keys:
-            # Update labels in-place (relative age changes); headers stay put
-            self._crashes = new_crashes
-            lv = self.query_one("#crash-list", ListView)
-            list_items = lv.query(ListItem)
-            for li, ci in enumerate(self._index_map):
-                if ci is not None and li < len(list_items):
-                    list_items[li].query_one(Label).update(crash_label(self._crashes[ci]))
-            return
         self._load_crashes()
 
-    def _update_detail(self, list_idx: int | None = None) -> None:
-        lv = self.query_one("#crash-list", ListView)
+    def _update_detail(self) -> None:
         detail = self.query_one("#detail", Static)
-        if list_idx is None:
-            list_idx = lv.index
-        if list_idx is None or list_idx >= len(self._index_map):
+        crash = self._get_selected_crash()
+        if crash is None:
             detail.update("No crash selected.")
             return
-        crash_idx = self._index_map[list_idx]
-        if crash_idx is None:
-            detail.update("No crash selected.")
-            return
-        crash = self._crashes[crash_idx]
         key = self._crash_key(crash)
         if key in self._analyzing:
             analyzing = "gdb"
@@ -325,64 +354,78 @@ class CrashBrowserApp(App):
             analyzing = "llm"
         else:
             analyzing = ""
-        detail.update(render_detail(crash, analyzing=analyzing))
+        detail.update(Text(render_detail(crash, analyzing=analyzing)))
 
-    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         self._update_detail()
 
-    def on_key(self, event) -> None:
-        if event.key == "enter":
-            self.action_analyze()
-            event.stop()
+    def _get_crash_leaves(self, node) -> list[Crash]:
+        """Return all crashes for leaf nodes under (and including) the given node."""
+        if isinstance(node.data, int):
+            return [self._crashes[node.data]]
+        results = []
+        for child in node.children:
+            results.extend(self._get_crash_leaves(child))
+        return results
+
+    def _start_gdb(self, crash: Crash) -> None:
+        key = self._crash_key(crash)
+        self._analyzing.add(key)
+        self._gdb_running += 1
+        self._update_detail()
+
+        def run_gdb() -> None:
+            subprocess.run(
+                [str(SCRIPT_DIR / "analyze.py"), crash.pr_id,
+                 "--worker", crash.worker_id, "--crash", crash.name],
+                cwd=SCRIPT_DIR,
+            )
+            self.call_from_thread(self.post_message, AnalysisDone(key))
+
+        threading.Thread(target=run_gdb, daemon=True).start()
+
+    def _drain_gdb_queue(self) -> None:
+        while self._gdb_queue and self._gdb_running < self._gdb_max_concurrent:
+            crash = self._gdb_queue.pop(0)
+            key = self._crash_key(crash)
+            if key not in self._analyzing:
+                self._start_gdb(crash)
 
     def action_analyze(self) -> None:
-        lv = self.query_one("#crash-list", ListView)
-        li = lv.index
-        if li is None or li >= len(self._index_map):
+        tree = self.query_one("#crash-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
             return
-        ci = self._index_map[li]
-        if ci is None:
-            return
-        crash = self._crashes[ci]
-        key = self._crash_key(crash)
 
-        if not crash.is_gdb_analyzed and key not in self._analyzing:
-            # Trigger GDB analysis
-            self._analyzing.add(key)
-            self._update_detail()
+        for crash in self._get_crash_leaves(node):
+            key = self._crash_key(crash)
+            if not crash.is_gdb_analyzed and key not in self._analyzing:
+                if crash not in self._gdb_queue:
+                    self._gdb_queue.append(crash)
+            elif crash.is_gdb_analyzed and not crash.is_llm_analyzed and key not in self._llm_analyzing:
+                self._llm_analyzing.add(key)
+                status = self.query_one("#llm-status", Static)
+                active = len(self._llm_analyzing)
+                status.update(f" Analyzing {escape(crash.name)}…" + (f" ({active} running)" if active > 1 else ""))
+                status.display = True
+                self._update_detail()
 
-            def run_gdb() -> None:
-                subprocess.run(
-                    ["python", str(SCRIPT_DIR / "analyze.py"), crash.pr_id],
-                    cwd=SCRIPT_DIR,
-                )
-                self.post_message(AnalysisDone(crash.pr_id))
+                def run_llm(c: Crash = crash, k: str = key) -> None:
+                    subprocess.run(
+                        ["uv", "run", str(SCRIPT_DIR / "pr_handler" / "analyze_crashes.py"),
+                         str(c.analysis_dir)],
+                        cwd=SCRIPT_DIR,
+                    )
+                    self.call_from_thread(self.post_message, LLMAnalysisDone(k))
 
-            threading.Thread(target=run_gdb, daemon=True).start()
+                threading.Thread(target=run_llm, daemon=True).start()
 
-        elif crash.is_gdb_analyzed and not crash.is_llm_analyzed and key not in self._llm_analyzing:
-            # Trigger LLM analysis
-            self._llm_analyzing.add(key)
-            status = self.query_one("#llm-status", Static)
-            active = len(self._llm_analyzing)
-            status.update(f" Analyzing {crash.name}…" + (f" ({active} running)" if active > 1 else ""))
-            status.display = True
-            self._update_detail()
-
-            def run_llm() -> None:
-                subprocess.run(
-                    ["uv", "run", str(SCRIPT_DIR / "pr_handler" / "analyze_crashes.py"),
-                     str(crash.analysis_dir)],
-                    cwd=SCRIPT_DIR,
-                )
-                self.post_message(LLMAnalysisDone(key))
-
-            threading.Thread(target=run_llm, daemon=True).start()
+        self._drain_gdb_queue()
 
     def on_analysis_done(self, event: AnalysisDone) -> None:
-        self._analyzing = {
-            k for k in self._analyzing if not k.startswith(f"{event.pr_id}/")
-        }
+        self._analyzing.discard(event.crash_key)
+        self._gdb_running = max(0, self._gdb_running - 1)
+        self._drain_gdb_queue()
         self._load_crashes()
 
     def on_llm_analysis_done(self, event: LLMAnalysisDone) -> None:
@@ -399,10 +442,31 @@ class CrashBrowserApp(App):
         self.notify("Crash list refreshed", timeout=2)
 
     def action_cursor_up(self) -> None:
-        self.query_one("#crash-list", ListView).action_cursor_up()
+        self.query_one("#crash-tree", Tree).action_cursor_up()
 
     def action_cursor_down(self) -> None:
-        self.query_one("#crash-list", ListView).action_cursor_down()
+        self.query_one("#crash-tree", Tree).action_cursor_down()
+
+    def action_collapse_node(self) -> None:
+        tree = self.query_one("#crash-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        if not node.is_collapsed and node.allow_expand:
+            node.collapse()
+        elif node.parent and node.parent != tree.root:
+            tree.move_cursor(node.parent)
+            node.parent.collapse()
+
+    def action_expand_node(self) -> None:
+        tree = self.query_one("#crash-tree", Tree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        if node.is_collapsed:
+            node.expand()
+        elif node.children:
+            tree.move_cursor(node.children[0])
 
 
 if __name__ == "__main__":

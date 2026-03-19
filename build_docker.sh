@@ -21,6 +21,7 @@ Arguments:
   PR_ID           GitHub PR number from python/cpython to build against
 
 Options:
+  --asan          Build with AddressSanitizer (outputs to dist/<id>-asan/)
   --force         Pass --force to build.sh (rebuild everything)
   --build         Force a rebuild of the ${BUILD_IMAGE} Docker image
   -h, --help      Show this help and exit
@@ -28,6 +29,7 @@ Options:
 Examples:
   $(basename "$0")            # build from current HEAD -> dist/main/
   $(basename "$0") 132345     # prep + build for PR -> dist/132345/
+  $(basename "$0") --asan     # ASAN build -> dist/main/ + dist/main/.asan marker
   $(basename "$0") --force    # force full rebuild inside container
 EOF
 }
@@ -35,10 +37,12 @@ EOF
 PR_ID=""
 FORCE=0
 FORCE_IMAGE=0
+ASAN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)    usage; exit 0 ;;
+    --asan)       ASAN=1; shift ;;
     --force)      FORCE=1; shift ;;
     --build)      FORCE_IMAGE=1; shift ;;
     -*)           echo "Unknown option: $1" >&2; echo; usage >&2; exit 1 ;;
@@ -58,6 +62,11 @@ if [[ "$FORCE_IMAGE" -eq 1 ]] || ! docker image inspect "$BUILD_IMAGE" >/dev/nul
 fi
 
 # Host prep — gh and uv are not available inside the container
+if [[ ! -d "$SCRIPT_DIR/python" ]]; then
+  echo "==> Cloning CPython..."
+  git clone --depth=1 https://github.com/python/cpython.git "$SCRIPT_DIR/python"
+fi
+
 if [[ -n "$PR_ID" ]]; then
   for cmd in gh uv; do
     command -v "$cmd" >/dev/null 2>&1 || { echo "Missing tool for PR mode: $cmd" >&2; exit 1; }
@@ -66,19 +75,24 @@ if [[ -n "$PR_ID" ]]; then
   echo "==> Generating fuzz cases for PR #${PR_ID}..."
   "$SCRIPT_DIR/pr_handler/gen_fuzz_cases.py" "$PR_ID"
 
-  if [[ ! -d "$SCRIPT_DIR/python" ]]; then
-    git clone --depth=1 https://github.com/python/cpython.git "$SCRIPT_DIR/python"
-  fi
   echo "==> Checking out PR #${PR_ID} in python/..."
   cd "$SCRIPT_DIR/python"
   gh pr checkout "$PR_ID" --repo python/cpython
-  cd "$SCRIPT_DIR"
+else
+  echo "==> Resetting CPython to origin/main..."
+  cd "$SCRIPT_DIR/python"
+  git fetch origin main
+  git checkout main
+  git reset --hard origin/main
 fi
+git clean -fd
+cd "$SCRIPT_DIR"
 
-# Assemble build.sh args: PR_ID if given, --skip-checkout (done above), --force if requested
+# Assemble build.sh args: PR_ID if given, --skip-checkout (done above), --force/--asan if requested
 BUILD_ARGS=(--skip-checkout)
 [[ -n "$PR_ID" ]] && BUILD_ARGS=("$PR_ID" "${BUILD_ARGS[@]}")
 [[ "$FORCE" -eq 1 ]] && BUILD_ARGS+=(--force)
+[[ "$ASAN"  -eq 1 ]] && BUILD_ARGS+=(--asan)
 
 echo "==> Building dist/ inside container (image: ${BUILD_IMAGE})..."
 docker run --rm \

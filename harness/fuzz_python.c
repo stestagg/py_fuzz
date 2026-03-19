@@ -193,17 +193,6 @@ int main(int argc, char **argv) {
         Py_ExitStatusException(status);
     }
 
-    /*
-     * Warm-up:
-     *
-     * This does NOT force all possible extension modules to be dlopen()'d.
-     * The old comment overstated what this achieves.
-     *
-     * What it does do is exercise a minimal compile+eval path once in the
-     * parent process, so some one-time interpreter work happens before the
-     * forkserver starts. That makes the fuzz loop slightly less "cold" and
-     * avoids paying a few lazy-init costs on the first testcase in each child.
-     */
     {
         PyObject *code = Py_CompileString("x = 1\n", "<warmup>", Py_file_input);
         if (code) {
@@ -226,6 +215,15 @@ int main(int argc, char **argv) {
         }
         PyErr_Clear();
     }
+
+    PyRun_SimpleString(
+        // "import bz2, csv, ctypes, heapq, lzma, "
+        // "struct, binascii, fcntl, math, "
+        // "pyexpat, select, termios, unicodedata, zlib"
+        // "from xml.parsers import expat"
+        "import binascii"
+    );
+    PyErr_Clear();
 
     /*
      * Capture baseline builtins and sys.modules after warm-up.
@@ -266,7 +264,7 @@ int main(int argc, char **argv) {
     unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
     unsigned long iter = 0;
 
-    while (__AFL_LOOP(10000)) {
+    while (__AFL_LOOP(1000)) {
         iter++;
 
         int len = __AFL_FUZZ_TESTCASE_LEN;
@@ -322,7 +320,9 @@ int main(int argc, char **argv) {
          * This does not make iterations fully isolated, but it cuts down on
          * some common persistent-mode contamination at moderate cost.
          */
-        PyErr_Clear();
+        if (PyErr_Occurred()) {
+            PyErr_Print();
+        }
 
         if (MODULE_CLEANUP_EVERY > 0 && (iter % MODULE_CLEANUP_EVERY) == 0) {
             cleanup_sys_modules();

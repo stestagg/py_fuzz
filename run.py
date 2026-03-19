@@ -102,9 +102,14 @@ def cli(pr_id, output, jobs, timeout):
         click.echo(f"==> Session timeout: {timeout} ({secs}s)")
         timeout_args = ['-V', str(secs)]
 
+    resuming = (output_dir / 'main').exists()
+    if resuming:
+        click.echo("==> Resuming previous session (-i -)")
+    input_arg = '-' if resuming else testcases_dir
+
     afl_common = [
         'afl-fuzz',
-        '-i', testcases_dir,
+        '-i', input_arg,
         '-o', str(output_dir),
         '-t', '5000',
         '-m', '512',

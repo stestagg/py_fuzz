@@ -33,12 +33,20 @@ SCHEMA = {
 }
 
 
+def truncate_middle(text: str, limit: int = 30_000) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    marker = "\n[.. content skipped ..]\n"
+    return text[:half] + marker + text[-half:]
+
+
 def build_prompt(input_code: str, gdb_output: str) -> str:
     return (
         "--- Python Input ---\n"
         f"{input_code}\n\n"
         "--- GDB Output ---\n"
-        f"{gdb_output}"
+        f"{truncate_middle(gdb_output)}"
     )
 
 
@@ -66,7 +74,8 @@ def analyze_crash(crash_dir: Path, client, model: str) -> None:
             "You are a CPython crash analyst. "
             "Reason strictly from the data provided — do not speculate beyond what the evidence shows. "
             "Determine whether this is a CPython interpreter bug or expected behavior, "
-            "classify the error, and summarize the crash."
+            "classify the error, and summarize the crash.  Note, we are only interested in crashes or errors that indicate actual bugs. "
+            "Sometimes the replay does not reproduce the crash, but there may be errors in the output that are not cpython bugs, (e.g. syntax errors etc..) these should be ignored."
         ),
         input=build_prompt(input_code, gdb_output),
         text={

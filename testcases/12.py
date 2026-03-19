@@ -1,0 +1,1 @@
+import binascii; binascii.a2b_ascii85(b"s8W-!", foldspaces=False)
