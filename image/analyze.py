@@ -1,3 +1,11 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "click>=8.1,<9",
+#   "odhash",
+# ]
+# ///
 from __future__ import annotations
 
 import re
@@ -5,9 +13,29 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import click
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).parent.parent))
 
-from tools.pyfuzz.console import detail, step, success, warn
+import click
+import odhash
+from image.env import AFL_IGNORE_PROBLEMS
+
+
+def step(message: str) -> None:
+    click.echo(click.style(f"==> {message}", fg="white", bg="blue", bold=True))
+
+
+def success(message: str) -> None:
+    click.echo(click.style(message, fg="green"))
+
+
+def warn(message: str) -> None:
+    click.echo(click.style(message, fg="yellow"), err=True)
+
+
+def detail(label: str, value: str) -> None:
+    click.echo(f"  {click.style(label, fg='blue')}: {value}")
 
 
 def parse_memory_limit(readme: Path) -> int | None:
@@ -17,9 +45,19 @@ def parse_memory_limit(readme: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def analyze_crash(harness: Path, crash_path: Path, analysis_dir: Path, memory_limit_mb: int | None) -> None:
+def analyze_crash(harness: Path, crash_path: Path, analysis_dir: Path, memory_limit_mb: int | None, asan_options: str | None) -> None:
     analysis_dir.mkdir(parents=True, exist_ok=True)
-    cmds = ["-ex", "set pagination off", "-ex", "set confirm off"]
+    pythonhome = str(harness.parent / "install")
+    # Set PYTHONHOME on the inferior only — GDB has its own embedded Python
+    # and will break if PYTHONHOME points at a different Python installation.
+    cmds = [
+        "-ex", "set pagination off",
+        "-ex", "set confirm off",
+        "-ex", f"set environment PYTHONHOME {pythonhome}",
+        "-ex", f"set environment AFL_IGNORE_PROBLEMS {AFL_IGNORE_PROBLEMS}",
+    ]
+    if asan_options:
+        cmds += ["-ex", f"set environment ASAN_OPTIONS {asan_options}"]
     if memory_limit_mb is not None:
         limit_bytes = memory_limit_mb * 1024 * 1024
         cmds += ["-ex", f"set exec-wrapper prlimit --as={limit_bytes}:{limit_bytes}"]
@@ -36,7 +74,8 @@ def analyze_crash(harness: Path, crash_path: Path, analysis_dir: Path, memory_li
 @click.option("--worker")
 @click.option("--crash")
 @click.option("--no-memory-limit", is_flag=True)
-def main(project_root: Path, worker: str | None, crash: str | None, no_memory_limit: bool) -> None:
+@click.option("--asan-options", default=None)
+def main(project_root: Path, worker: str | None, crash: str | None, no_memory_limit: bool, asan_options: str | None) -> None:
     harness = project_root / "dist" / "fuzz_python"
     if not harness.exists():
         raise click.ClickException(f"Harness not found: {harness}")
@@ -54,11 +93,11 @@ def main(project_root: Path, worker: str | None, crash: str | None, no_memory_li
         for crash_path in sorted(path for path in crashes_dir.iterdir() if path.is_file() and path.name != "README.txt"):
             if crash and crash_path.name != crash:
                 continue
-            analysis_dir = project_root / "analysis" / f"{worker_dir.name}-{crash_path.name}"
+            analysis_dir = project_root / "analysis" / odhash.hash(crash_path.name)
             if (analysis_dir / "info.txt").exists():
                 warn(f"Skipping {crash_path.name}; analysis already exists")
                 continue
-            analyze_crash(harness, crash_path, analysis_dir, memory_limit)
+            analyze_crash(harness, crash_path, analysis_dir, memory_limit, asan_options)
 
 
 if __name__ == "__main__":

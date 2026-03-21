@@ -1,5 +1,8 @@
 FROM aflplusplus/aflplusplus:latest
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+ENV UV_LINK_MODE=copy
+
 # Dev libs required to compile CPython from source.
 # Also needs gcc for the nocorelimit.so shim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -10,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsqlite3-dev \
       liblzma-dev \
       pkg-config \
+      libclang-rt-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

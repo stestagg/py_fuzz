@@ -5,8 +5,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).parent.parent))
+
 import click
 
+from image.env import AFL_IGNORE_PROBLEMS
 from tools.pyfuzz.console import run, step, success
 
 
@@ -19,7 +24,8 @@ def needs_rebuild(target: Path, deps: list[Path], force: bool) -> bool:
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--force", is_flag=True)
-def main(force: bool) -> None:
+@click.option("--jobs", "-j", type=click.IntRange(min=1), default=None)
+def main(force: bool, jobs: int | None) -> None:
     repo = Path("/repo")
     project = Path("/project")
     source_dir = project / "cpython"
@@ -42,9 +48,20 @@ def main(force: bool) -> None:
 
     afl_cc = shutil.which("afl-clang-fast") or shutil.which("afl-clang-lto") or "afl-clang-fast"
     extra_cflags = ["-fsanitize=address", "-fno-omit-frame-pointer"] if asan else []
-    env = dict(os.environ)
+
+    base_env = dict(os.environ)
     if asan:
-        env["AFL_USE_ASAN"] = "1"
+        base_env["AFL_USE_ASAN"] = "1"
+
+    configure_env = {
+        **base_env,
+        "CC": afl_cc,
+        "CFLAGS": " ".join(["-O2", "-g", *extra_cflags]),
+        "LDFLAGS": " ".join(extra_cflags),
+        "ax_cv_c_float_words_bigendian": "no",
+    }
+    make_env = {**base_env, "PYTHONPATH": str(source_dir / "Lib"), "AFL_IGNORE_PROBLEMS": AFL_IGNORE_PROBLEMS}
+    cmplog_env = {**base_env, "AFL_LLVM_CMPLOG": "1"}
 
     python_bin = prefix / "bin" / "python3"
     if needs_rebuild(python_bin, [source_dir / "configure"], force):
@@ -54,9 +71,15 @@ def main(force: bool) -> None:
             f"--prefix={prefix}",
             "--disable-shared",
             "--without-pymalloc",
-        ], cwd=source_dir, env={**env, "CC": afl_cc, "CFLAGS": " ".join(["-O2", "-g", *extra_cflags]), "LDFLAGS": " ".join(extra_cflags), "ax_cv_c_float_words_bigendian": "no"})
-        run(["make", f"-j{os.cpu_count() or 4}"], cwd=source_dir, env={**env, "PYTHONPATH": str(source_dir / "Lib")})
-        run(["make", "install"], cwd=source_dir, env=env)
+            "--without-ensurepip",      # no pip bootstrapping
+            "--disable-test-modules",   # no _testcapi, _testinternalcapi, etc.
+            "--without-doc-strings",    # strip docstrings — saves space, irrelevant for fuzzing
+        ], cwd=source_dir, env=configure_env)
+        run(["make", f"-j{jobs or os.cpu_count() or 4}"], cwd=source_dir, env=make_env)
+        # COMPILEALL_OPTS=-j0 disables .pyc precompilation during install — the ASAN-instrumented
+        # Python uses enough memory during compileall to trigger OOM kills. pyc files are
+        # unnecessary since the harness runs with write_bytecode=0.
+        run(["make", "install", "COMPILEALL_OPTS=-j0"], cwd=source_dir, env={**base_env, "AFL_IGNORE_PROBLEMS": AFL_IGNORE_PROBLEMS})
     else:
         step("Instrumented CPython is up to date")
 
@@ -70,18 +93,22 @@ def main(force: bool) -> None:
         else:
             linker_flags.append(flag)
 
+    harness_cmd = [afl_cc, "-O2", "-g", *extra_cflags, *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o"]
+    # cmplog harness is built without ASAN: the cmplog instrumentation does 8-byte reads
+    # on comparison operands which trips ASAN global redzones on short string literals.
+    harness_cmplog_cmd = [afl_cc, "-O2", "-g", *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o"]
     if needs_rebuild(harness, [harness_src, pycfg], force):
         step(f"Building harness {harness.name}")
-        run([afl_cc, "-O2", "-g", *extra_cflags, *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o", str(harness)], env=env)
+        run([*harness_cmd, str(harness)], env=base_env)
     if needs_rebuild(harness_cmplog, [harness_src, pycfg], force):
         step(f"Building harness {harness_cmplog.name}")
-        run([afl_cc, "-O2", "-g", *extra_cflags, *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o", str(harness_cmplog)], env={**env, "AFL_LLVM_CMPLOG": "1"})
+        run([*harness_cmplog_cmd, str(harness_cmplog)], env=cmplog_env)
     if needs_rebuild(shim_so, [shim_src], force):
         step(f"Building shim {shim_so.name}")
-        run(["gcc", "-shared", "-fPIC", "-o", str(shim_so), str(shim_src), "-ldl"])
+        run(["gcc", "-shared", "-fPIC", "-o", str(shim_so), str(shim_src), "-ldl"], env=base_env)
     if needs_rebuild(trace_so, [trace_src], force):
         step(f"Building shim {trace_so.name}")
-        run(["gcc", "-shared", "-fPIC", "-o", str(trace_so), str(trace_src), "-ldl"])
+        run(["gcc", "-shared", "-fPIC", "-o", str(trace_so), str(trace_src), "-ldl"], env=base_env)
     success(f"Build complete for {project.name}")
 
 

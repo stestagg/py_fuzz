@@ -1,0 +1,1 @@
+import binascii; binascii.b2a_uu(b"", backtick=True)

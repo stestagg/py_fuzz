@@ -7,4 +7,5 @@ dependencies = [
   "click>=8.1,<9",
   "rich>=13,<14",
   "textual>=0.81,<1",
+  "odhash",
 ]

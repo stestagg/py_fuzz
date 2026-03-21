@@ -1,11 +1,23 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "click>=8.1,<9",
+# ]
+# ///
 from __future__ import annotations
 
 import os
 import subprocess
 from pathlib import Path
 
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).parent.parent))
+
 import click
 
+from image.env import base_env
 from tools.pyfuzz.console import detail, step, success, warn
 
 
@@ -18,17 +30,14 @@ def main(project_root: Path, jobs: int, timeout: int | None) -> None:
     output_dir = project_root / "outputs"
     harness = dist_dir / "fuzz_python"
     harness_cmplog = dist_dir / "fuzz_python_cmplog"
-    env = dict(os.environ)
-    env["PYTHONHOME"] = str(dist_dir / "install")
-    shim = dist_dir / "nocorelimit.so"
-    if shim.exists():
-        env["LD_PRELOAD"] = str(shim)
+    env = base_env(dist_dir)
+    asan = (dist_dir / ".asan").exists()
     afl_common = [
         "afl-fuzz",
         "-i", "-" if (output_dir / "main").exists() else os.environ["TESTCASES_DIR"],
         "-o", str(output_dir),
         "-t", "5000",
-        "-m", "512",
+        "-m", "none" if asan else "512",
         "-x", os.environ["DICT_FILE"],
     ]
     if timeout is not None:
@@ -44,7 +53,7 @@ def main(project_root: Path, jobs: int, timeout: int | None) -> None:
         procs.append((proc, log_file))
         detail(f"worker{idx}", f"pid={proc.pid} log={log_path}")
     main_cmd = [*afl_common, "-M", "main"]
-    if harness_cmplog.exists():
+    if harness_cmplog.exists() and not asan:
         main_cmd += ["-c", str(harness_cmplog)]
     main_cmd += ["--", str(harness)]
     try:

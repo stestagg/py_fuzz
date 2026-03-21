@@ -12,7 +12,7 @@ def command_text(cmd: list[str]) -> str:
 
 
 def step(message: str) -> None:
-    click.echo(click.style(f"==> {message}", fg="cyan", bold=True))
+    click.echo(click.style(f"==> {message}", fg="white", bg="blue", bold=True))
 
 
 def success(message: str) -> None:

@@ -1,7 +1,7 @@
 {
-  "asan": false,
-  "env_id": "main-heisen",
-  "name": "main-heisen",
-  "pr_id": null,
-  "testcase_dir": "testcases"
+  "asan": true,
+  "created_at": "2026-03-19T22:23:58.361786+00:00",
+  "env_id": "main-heisen",  
+  "branch": "main",
+  "asan_options": "symbolize=0:abort_on_error=1:detect_leaks=0:allocator_may_return_null=1"
 }

@@ -5,6 +5,7 @@ FROM aflplusplus/aflplusplus:latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
       gosu \
       curl \
+      strace \
     && rm -rf /var/lib/apt/lists/*
 
 # uv: runs run.py and manages its dependencies
