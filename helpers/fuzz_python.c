@@ -226,6 +226,38 @@ int main(int argc, char **argv) {
     PyErr_Clear();
 
     /*
+     * Pre-import modules listed in FUZZ_WARMUP_IMPORTS (comma-separated) so
+     * their .so files are resident in the process before the AFL forkserver
+     * starts.  Without this, afl-clang-fast-instrumented extension modules
+     * loaded via dlopen() inside __AFL_LOOP trigger the fatal
+     * "forkserver is already up, but an instrumented dlopen() library loaded
+     * afterwards" error even when ASAN is disabled.
+     */
+    {
+        const char *warmup = getenv("FUZZ_WARMUP_IMPORTS");
+        if (warmup && *warmup) {
+            char *buf = strdup(warmup);
+            if (buf) {
+                char *saveptr = NULL;
+                char *tok = strtok_r(buf, ",", &saveptr);
+                while (tok) {
+                    while (*tok == ' ' || *tok == '\t') tok++;
+                    if (*tok) {
+                        PyObject *mod = PyImport_ImportModule(tok);
+                        if (mod) {
+                            Py_DECREF(mod);
+                        } else {
+                            PyErr_Clear();
+                        }
+                    }
+                    tok = strtok_r(NULL, ",", &saveptr);
+                }
+                free(buf);
+            }
+        }
+    }
+
+    /*
      * Capture baseline builtins and sys.modules after warm-up.
      * These are used to reduce cross-iteration contamination.
      */

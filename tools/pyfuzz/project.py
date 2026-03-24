@@ -21,6 +21,7 @@ class ProjectConfig:
     commit: str | None = None
     asan: bool = False
     asan_options: str = "symbolize=0:abort_on_error=1:detect_leaks=0:allocator_may_return_null=1"
+    warmup_imports: str = ""
     created_at: str | None = None
 
     @property

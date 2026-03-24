@@ -1,0 +1,2 @@
+from decimal import Decimal
+Decimal("1e+0000000000000000000000000000000000000001")

@@ -7,6 +7,7 @@
 # ///
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -32,6 +33,12 @@ def main(project_root: Path, jobs: int, timeout: int | None) -> None:
     harness_cmplog = dist_dir / "fuzz_python_cmplog"
     env = base_env(dist_dir)
     asan = (dist_dir / ".asan").exists()
+    cfg_path = project_root / "project.json"
+    if cfg_path.exists():
+        cfg = json.loads(cfg_path.read_text())
+        warmup = cfg.get("warmup_imports", "")
+        if warmup:
+            env["FUZZ_WARMUP_IMPORTS"] = warmup
     afl_common = [
         "afl-fuzz",
         "-i", "-" if (output_dir / "main").exists() else os.environ["TESTCASES_DIR"],
