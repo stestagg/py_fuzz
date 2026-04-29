@@ -13,6 +13,22 @@ import click
 
 from image.env import AFL_IGNORE_PROBLEMS
 from tools.pyfuzz.console import run, step, success
+from tools.pyfuzz.project import load_project_config_from_root, resolve_harness_paths
+
+FRAME_POINTER_CFLAGS = ["-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer"]
+
+
+def compiler_cflags() -> list[str]:
+    asan = False
+    cflags = ["-O2", "-g", *FRAME_POINTER_CFLAGS]
+    if asan:
+        cflags.append("-fsanitize=address")
+    return cflags
+
+
+def analysis_linker_flags() -> list[str]:
+    asan = False
+    return ["-fsanitize=address"] if asan else []
 
 
 def needs_rebuild(target: Path, deps: list[Path], force: bool) -> bool:
@@ -28,36 +44,33 @@ def needs_rebuild(target: Path, deps: list[Path], force: bool) -> bool:
 def main(force: bool, jobs: int | None) -> None:
     repo = Path("/repo")
     project = Path("/project")
+    config = load_project_config_from_root(project)
     source_dir = project / "cpython"
     dist_dir = project / "dist"
     prefix = dist_dir / "install"
     harness_src = repo / "helpers" / "fuzz_python.c"
-    shim_src = repo / "helpers" / "nocorelimit.c"
+    peg_harness_src = repo / "helpers" / "fuzz_peg.c"
     trace_src = repo / "helpers" / "trace_dlopen.c"
-    harness = dist_dir / "fuzz_python"
-    harness_cmplog = dist_dir / "fuzz_python_cmplog"
-    shim_so = dist_dir / "nocorelimit.so"
+    mem_limit_src = repo / "helpers" / "mem_limit_exec.c"
+    harness, harness_cmplog = resolve_harness_paths(project, config.harness)
     trace_so = dist_dir / "trace_dlopen.so"
-    asan = os.environ.get("ASAN") == "1"
 
     dist_dir.mkdir(parents=True, exist_ok=True)
-    if asan:
-        (dist_dir / ".asan").write_text("")
-    else:
-        (dist_dir / ".asan").unlink(missing_ok=True)
+    harness.parent.mkdir(parents=True, exist_ok=True)
 
-    afl_cc = shutil.which("afl-clang-fast") or shutil.which("afl-clang-lto") or "afl-clang-fast"
-    extra_cflags = ["-fsanitize=address", "-fno-omit-frame-pointer"] if asan else []
+    afl_cc = shutil.which("afl-clang-lto")
+    common_cflags = compiler_cflags()
+    common_linker_flags = analysis_linker_flags()
+    cmplog_cflags = compiler_cflags()
 
     base_env = dict(os.environ)
-    if asan:
-        base_env["AFL_USE_ASAN"] = "1"
 
     configure_env = {
         **base_env,
         "CC": afl_cc,
-        "CFLAGS": " ".join(["-O2", "-g", *extra_cflags]),
-        "LDFLAGS": " ".join(extra_cflags),
+        "CXX": afl_cc + "++",
+        "CFLAGS": " ".join(common_cflags),
+        "LDFLAGS": " ".join(common_linker_flags),
         "ax_cv_c_float_words_bigendian": "no",
     }
     make_env = {**base_env, "PYTHONPATH": str(source_dir / "Lib"), "AFL_IGNORE_PROBLEMS": AFL_IGNORE_PROBLEMS}
@@ -86,29 +99,40 @@ def main(force: bool, jobs: int | None) -> None:
     pycfg = prefix / "bin" / "python3-config"
     include_flags = subprocess.check_output([str(pycfg), "--includes"], text=True).strip().split()
     ldflags = subprocess.check_output([str(pycfg), "--ldflags", "--embed"], text=True).strip().split()
-    linker_flags: list[str] = []
+    embed_linker_flags: list[str] = []
     for flag in ldflags:
         if flag.startswith("-lpython"):
-            linker_flags += ["-Wl,--whole-archive", flag, "-Wl,--no-whole-archive"]
+            embed_linker_flags += ["-Wl,--whole-archive", flag, "-Wl,--no-whole-archive"]
         else:
-            linker_flags.append(flag)
+            embed_linker_flags.append(flag)
 
-    harness_cmd = [afl_cc, "-O2", "-g", *extra_cflags, *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o"]
+    harness_cmd = [afl_cc, *common_cflags, *include_flags, str(harness_src), *embed_linker_flags, "-Wl,-export-dynamic", "-o"]
     # cmplog harness is built without ASAN: the cmplog instrumentation does 8-byte reads
     # on comparison operands which trips ASAN global redzones on short string literals.
-    harness_cmplog_cmd = [afl_cc, "-O2", "-g", *include_flags, str(harness_src), *linker_flags, "-Wl,-export-dynamic", "-o"]
+    harness_cmplog_cmd = [afl_cc, *cmplog_cflags, *include_flags, str(harness_src), *embed_linker_flags, "-Wl,-export-dynamic", "-o"]
     if needs_rebuild(harness, [harness_src, pycfg], force):
         step(f"Building harness {harness.name}")
         run([*harness_cmd, str(harness)], env=base_env)
     if needs_rebuild(harness_cmplog, [harness_src, pycfg], force):
         step(f"Building harness {harness_cmplog.name}")
         run([*harness_cmplog_cmd, str(harness_cmplog)], env=cmplog_env)
-    if needs_rebuild(shim_so, [shim_src], force):
-        step(f"Building shim {shim_so.name}")
-        run(["gcc", "-shared", "-fPIC", "-o", str(shim_so), str(shim_src), "-ldl"], env=base_env)
+    peg_harness = dist_dir / "fuzz_peg"
+    peg_harness_cmplog = dist_dir / "fuzz_peg_cmplog"
+    peg_cmd = [afl_cc, *common_cflags, *include_flags, str(peg_harness_src), *embed_linker_flags, "-Wl,-export-dynamic", "-o"]
+    peg_cmplog_cmd = [afl_cc, *cmplog_cflags, *include_flags, str(peg_harness_src), *embed_linker_flags, "-Wl,-export-dynamic", "-o"]
+    if needs_rebuild(peg_harness, [peg_harness_src, pycfg], force):
+        step(f"Building harness {peg_harness.name}")
+        run([*peg_cmd, str(peg_harness)], env=base_env)
+    if needs_rebuild(peg_harness_cmplog, [peg_harness_src, pycfg], force):
+        step(f"Building harness {peg_harness_cmplog.name}")
+        run([*peg_cmplog_cmd, str(peg_harness_cmplog)], env=cmplog_env)
     if needs_rebuild(trace_so, [trace_src], force):
         step(f"Building shim {trace_so.name}")
-        run(["gcc", "-shared", "-fPIC", "-o", str(trace_so), str(trace_src), "-ldl"], env=base_env)
+        run(["clang", "-shared", "-fPIC", "-o", str(trace_so), str(trace_src), "-ldl"], env=base_env)
+    mem_limit_exec = dist_dir / "mem_limit_exec"
+    if needs_rebuild(mem_limit_exec, [mem_limit_src], force):
+        step(f"Building helper {mem_limit_exec.name}")
+        run(["clang", "-O2", "-o", str(mem_limit_exec), str(mem_limit_src)], env=base_env)
     success(f"Build complete for {project.name}")
 
 
