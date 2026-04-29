@@ -8,3 +8,4 @@ dist/
 projects/*
 .venv/
 .uv-pfrun-cache/
+envs/*/fs.img
