@@ -1,1 +1,0 @@
-import binascii; binascii.a2b_base64(b"AA#A", ignorechars=b"#")

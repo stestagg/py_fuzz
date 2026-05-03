@@ -4,10 +4,9 @@ version = "0.1.0"
 description = "Unified tooling for building, running, and analyzing py-fuzz projects"
 requires-python = ">=3.11"
 dependencies = [
-  "click>=8.1,<9",
-  "openai>=2.29,<3",
-  "rich>=13,<14",
-  "pydantic>=2.11,<3",
-  "textual>=0.81,<1",
-  "odhash",
+  "click",
+  "jinja2"
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]

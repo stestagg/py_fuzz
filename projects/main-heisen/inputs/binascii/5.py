@@ -1,1 +1,0 @@
-import binascii; binascii.b2a_uu(b"A"*46)

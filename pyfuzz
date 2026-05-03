@@ -1,13 +1,12 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
 # dependencies = [
-#   "click>=8.1,<9",
-#   "rich>=13,<14",
-#   "textual>=0.81,<1",
+#   "pyfuzz",
 # ]
+# [tool.uv.sources]
+# pyfuzz = { path = ".", editable=true }
 # ///
-from tools.pyfuzz.cli import main
+from pyfuzz import cli
 
 if __name__ == "__main__":
-    main()
+    cli.cli()
