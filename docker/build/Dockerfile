@@ -23,3 +23,11 @@ RUN mkdir -p /src
 COPY build.sh /src/build.sh
 RUN chmod +x /src/build.sh
 WORKDIR /src
+
+# CC=/usr/bin/afl-clang-lto
+# CXX=/usr/bin/afl-clang-lto++
+
+COPY lto-wrap.py /usr/bin/wrap-afl-clang-lto
+RUN chmod +x /usr/bin/wrap-afl-clang-lto
+COPY lto-wrap.py /usr/bin/wrap-afl-clang-lto++
+RUN chmod +x /usr/bin/wrap-afl-clang-lto++

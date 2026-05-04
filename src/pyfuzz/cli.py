@@ -5,6 +5,7 @@ import os
 
 from .project import Project
 from .env import Env, Image, Runner
+from .clean import CleanComponent, clean
 
 def load_project_name_from_file() -> str | None:
     base = Path.cwd()
@@ -89,3 +90,16 @@ def build(ctx):
     from .pybuild import build_python
     asyncio.run(build_python(project))
     click.echo(f"Build complete for project: {ctx.obj['project']}")
+
+
+@cli.command("clean")
+@click.argument("component", type=click.Choice([c.value for c in CleanComponent]), nargs=-1)
+@click.pass_context
+def clean_cmd(ctx, component):
+    click.echo(f"Cleaning project: {ctx.obj['project']}")
+    project = Project.load(ctx.obj["project"])
+    click.echo(f"Loaded project: {project}")
+    if not component:
+        raise click.UsageError("At least one component must be specified for cleaning")
+    clean(project, [CleanComponent(c) for c in component])
+    click.echo(f"Clean complete for project: {ctx.obj['project']}")

@@ -30,5 +30,36 @@ fi
 
 cd "$CHECKOUT_ROOT"
 
-./configure --prefix="$INSTALL_ROOT"
-make -j4 install
+
+export LTOWRAP_ENABLE=0
+if [ -e /tmp/ltowrap.json ]; then
+    rm /tmp/ltowrap.json
+fi
+
+./configure --prefix="$INSTALL_ROOT" \
+            --disable-shared \
+            --without-ensurepip \
+            --disable-test-modules \
+            --without-doc-strings \
+            --cache-file=/pfm/cache/config-cache
+
+export LTOWRAP_ENABLE=1
+
+sed -i 's|^\(\$(BUILDPYTHON):[[:space:]]*Programs/python\.o[[:space:]]\+\$(LINK_PYTHON_DEPS)\)|\1 $(SHAREDMODS)|' Makefile
+
+make -j1 install
+
+export AFL_LLVM_CMPLOG=1
+export LTOWRAP_ENABLE=0
+if [ -e /tmp/ltowrap.json ]; then
+    rm /tmp/ltowrap.json
+fi
+
+# mkdir "$INSTALL_ROOT/cmplog"
+# ./configure --prefix="$INSTALL_ROOT/cmplog" \
+#             --disable-shared \
+#             --without-ensurepip \
+#             --disable-test-modules \
+#             --without-doc-strings
+# export LTOWRAP_ENABLE=1
+# make -j4 install

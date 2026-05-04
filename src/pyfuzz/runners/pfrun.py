@@ -15,6 +15,7 @@ async def pf_run(
     vm_mem: int = None,
     vm_timeout: int = None,
     console: bool = False,
+    interactive: bool = False,
 ):
     assert env.runner == Runner.PFRUN
     
@@ -42,6 +43,9 @@ async def pf_run(
             pf_cmd.extend([f'--mount-rw', f'{mount_dir}:{mount_name}'])
         else:
             pf_cmd.extend([f'--mount', f'{mount_dir}:{mount_name}'])
+
+    if interactive:
+        console = True
 
     pipe_val = None if console else subprocess.PIPE 
 

@@ -88,6 +88,9 @@ class Env:
             mounts.append((self.project.path("py"), True))
             mounts.append((self.project.path("cpython"), True))
             mounts.append((root_path("cache"), True))
+        
+        if self.image == Image.AFL:
+            mounts.append((self.project.path('py'), False))
 
         # mounts.append((self.project.path("py"), False))
         return mounts

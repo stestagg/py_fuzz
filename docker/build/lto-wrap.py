@@ -1,0 +1,137 @@
+#!/usr/bin/python
+import os
+from pathlib import Path
+import sys
+import subprocess
+import re
+
+TOOL_PATH = '/usr/bin'
+STATE_PATH = Path('/tmp/lto-wrap-state.json')
+NO_AFL_BINARIES = {'Programs/_freeze_module', '_bootstrap_python', 'Programs/_testembed'}
+
+AFL_ALTERNATIVES = {
+    'afl-clang-lto': 'clang',
+}
+
+CAPTURE_EDGES = object()
+class AlternateBinary(str):
+    pass
+
+
+def load_state():
+    if STATE_PATH.exists():
+        import json
+        return json.loads(STATE_PATH.read_text())
+    return {}
+
+
+def save_state(state):
+    import json
+    STATE_PATH.write_text(json.dumps(state))
+
+
+def is_object_compile(cmd, args):
+    try:
+        c_index = args.index('-c')
+        o_index = args.index('-o')
+        if o_index > c_index and args[o_index + 1].endswith('.o'):
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def get_output_file(args):
+    try:
+        o_index = args.index('-o')
+        if o_index + 1 < len(args):
+            return args[o_index + 1]
+    except ValueError:
+        pass
+    return None
+
+
+def prepare(cmd, args, env):
+    env['AFL_LLVM_LTO_DONTWRITEID'] = '1'
+    # if we have '-c' followed by '-o' and the -o file is a .o file, then we are compiling an object file and should not do anything special
+    if is_object_compile(cmd, args):
+        return
+    
+    output_file = get_output_file(args)
+    if output_file in NO_AFL_BINARIES:
+        print(f"LTO WRAP: IGNORING for {output_file}", file=sys.stderr)
+        args[:0] = ['-flto=thin', '-fuse-ld=lld', '-O0', '-Wl,--thinlto-jobs=all', '-Wl,--thinlto-cache-dir=/pfm/cache/thinlto']
+        return AlternateBinary(AFL_ALTERNATIVES[cmd])
+    
+    state = load_state()
+    if state.get('do_halt'):
+        print(f"LTO WRAP: HALTING", file=sys.stderr)
+        sys.exit(1)
+
+    start_id = state.get('start_id', 0)
+
+    if output_file.endswith('.so'):
+        env['AFL_DEBUG'] = '1'
+        env['AFL_LLVM_LTO_STARTID'] = str(start_id)
+        print(f"\x1b[34mSTARTID={start_id}\x1b[0m", file=sys.stderr)
+        return CAPTURE_EDGES
+    
+    if output_file == 'python.exe':
+        del env['AFL_LLVM_LTO_DONTWRITEID']
+        env['AFL_LLVM_LTO_STARTID'] = str(start_id)
+        return
+    
+    print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
+    raise ValueError(f"Unhandled scenario")
+
+
+def run_capture_edges(cmd_abs, args, env):
+    print(env, file=sys.stderr)
+    # We have to capture the afl-clang-lto output to see how many edges it found, and then exit with the exit code.
+    result = subprocess.run([cmd_abs] + args, env=env, capture_output=True, text=True)
+    # print("--- STDOUT ---", file=sys.stderr)
+    # print(repr(result.stdout), file=sys.stderr)
+    # print("--- STDERR ---", file=sys.stderr)
+    # print(repr(result.stderr), file=sys.stderr)
+
+    # Find: 'Instrumented N locations ' in stdout
+    matches = re.findall(r'Instrumented (\d+) locations', result.stdout)
+    if not matches:
+        raise RuntimeError(f"Could not find 'Instrumented N locations' in output: {result.stdout}")
+    if len(matches) > 1:
+        raise RuntimeError(f"Found multiple 'Instrumented N locations' in output: {result.stdout}")
+    
+    num_edges = int(matches[-1])
+    print(f"LTO WRAP: Captured {num_edges} edges", file=sys.stderr)
+    state = load_state()
+    state['start_id'] = state.get('start_id', 0) + num_edges
+    save_state(state)
+    sys.exit(result.returncode)
+
+
+
+def main(cmd, args):
+    is_enabled = os.environ.get('LTOWRAP_ENABLE', '1') == '1'
+    env = os.environ.copy()
+    
+    res = None
+    if is_enabled:
+        res = prepare(cmd, args, env)
+
+    if isinstance(res, AlternateBinary):
+        cmd = str(res)
+
+    cmd_abs = f'{TOOL_PATH}/{cmd}'
+
+    print(f"\x1b[31mRunning: {cmd_abs} {args}\x1b[0m", file=sys.stderr)
+    if res is CAPTURE_EDGES:
+        run_capture_edges(cmd_abs, args, env)
+    else:
+        os.execve(cmd_abs, [cmd_abs] + args, env)
+
+
+if __name__ == "__main__":
+    launch_name = Path(sys.argv[0]).name
+    proxied_for = launch_name.removeprefix('wrap-')
+    args = sys.argv[1:]
+    main(proxied_for, args)
