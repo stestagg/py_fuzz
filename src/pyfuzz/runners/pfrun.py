@@ -25,14 +25,21 @@ async def pf_run(
     ncpu = ncpu or env.project.ncpu
     vm_mem = vm_mem or env.project.vm_mem
 
+    export_script = env.shell_export
+    (env.project.path("envs") / f'{env.image.value}.env').write_text(export_script + "\n")
+
+    env_file = f"/pfm/envs/{env.image.value}.env"
+
     cmd_str = shlex.join(str(part) for part in cmd)
 
     pf_cmd = [
+
         str(PFRUN_BINARY),
         f'--imagedir', image_dir,
         f'--ncpu', str(ncpu),
         f'--mem', str(vm_mem),
         f'--cmd', cmd_str,
+        f'--env-file', env_file,
     ]
     if vm_timeout is not None:
         pf_cmd.extend([f'--timeout', str(vm_timeout)])

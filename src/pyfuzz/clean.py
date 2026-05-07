@@ -30,8 +30,9 @@ def clean_component(project: Project, component: CleanComponent):
     elif component == CleanComponent.BUILD:
         clean_dir(project_path(project, "cpython"))
         clean_dir(project_path(project, "py"))
+        clean_dir(project_path(project, "tools"))
     elif component == CleanComponent.ANALYSIS:
-        clean_dir(project_path(project, "analysis"))
+        clean_dir(project_path(project, "artifacts"))
     elif component == CleanComponent.ALL:
         for comp in CleanComponent:
             if comp != CleanComponent.ALL:

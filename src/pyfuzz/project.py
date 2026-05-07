@@ -2,7 +2,7 @@
 from pathlib import Path
 from dataclasses import asdict, dataclass
 import json
-from .paths import project_path
+from .paths import PROJECT_ROOT, project_path
 
 DEFAULT_REPO = "python/cpython"
 
@@ -17,18 +17,23 @@ class Project:
     created_at: str | None = None
     vm_mem: int = 2048
     ncpu: int = 1
+    fuzz_timeout_ms: int = 5000
+    fuzz_mem_limit: int = 512
+    fuzz_peg: bool = False
+    py_configure_extra_args: str = ""
+    py_debug: bool = False
 
     _name: str = None
 
     @property
-    def clone_ref(self) -> str:
+    def clone_ref(self) -> tuple[str, str]:
         if self.pr_id is not None:
-            return f"pull/{self.pr_id}/head"
+            return ('branch', f"pull/{self.pr_id}/head")
         if self.branch is not None:
-            return self.branch
+            return ('branch', self.branch)
         if self.commit is not None:
-            return self.commit
-        return "main"
+            return ('commit', self.commit)
+        return ('branch', "main")
 
     @property
     def name(self) -> str:
@@ -65,14 +70,26 @@ class Project:
         config_path = root / "config" / "project.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text("{}")
-        skel_dirs = ['py', 'cpython', 'inputs', 'outputs', 'cores', 'analysis', 'logs']
+        skel_dirs = ['py', 'cpython', 'inputs', 'outputs', 'cores', 'artifacts', 'logs', 'tools', 'envs']
         for d in skel_dirs:
             (root / d).mkdir()
         return cls.load(name)
     
     @classmethod
     def projects(cls) -> set[str]:
-        return {p.parent.parent.name for p in project_path().glob("*/config/project.json")}
+        return {p.parent.parent.name for p in PROJECT_ROOT.glob("*/config/project.json")}
     
     def path(self, *parts: str) -> Path:
         return project_path(self.name, *parts)
+
+    @property
+    def fuzz_target(self) -> str:
+        return "/pfm/tools/fuzz_peg" if self.fuzz_peg else "/pfm/tools/fuzz_python"
+    
+    @property
+    def actual_fuzz_mem_limit(self) -> int:
+        return 0 if self.asan else self.fuzz_mem_limit
+    
+    @property
+    def actual_vm_mem(self) -> int:
+        return self.vm_mem if not self.asan else self.vm_mem * 3

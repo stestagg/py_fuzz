@@ -174,6 +174,9 @@ int main(int argc, char **argv) {
     PyConfig_InitIsolatedConfig(&config);
     config.install_signal_handlers = 0;
     config.write_bytecode = 0;
+    #ifdef Py_DEBUG
+    config.parser_debug = 1;
+    #endif
 
     /* PyConfig_InitIsolatedConfig sets use_environment=0, so PYTHONHOME is
      * silently ignored.  Read it manually so the harness is relocatable
@@ -221,7 +224,7 @@ int main(int argc, char **argv) {
         // "struct, binascii, fcntl, math, "
         // "pyexpat, select, termios, unicodedata, zlib"
         // "from xml.parsers import expat"
-        "import binascii"
+        "import binascii, unicodedata"
     );
     PyErr_Clear();
 

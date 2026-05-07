@@ -3,6 +3,8 @@ from .project import Project
 from . import runners
 from .paths import root_path
 import jinja2
+from functools import partial
+
 
 class Runner(Enum):
     DOCKER = "docker"
@@ -15,6 +17,22 @@ DOCKER_IMAGES = [p.name for p in root_path("docker").iterdir() if p.is_dir()]
 
 Image = Enum("Image", {name.upper(): name for name in PFRUN_IMAGES + DOCKER_IMAGES})
 
+SOFILE_BLACKLIST = {
+    "_interpreters."
+}
+
+def is_blacklisted(sofile) -> bool:
+    for b in SOFILE_BLACKLIST:
+        if b in str(sofile):
+            return True
+    return False
+
+def so_files(project):
+    dist_dir = project.path("py")
+    so_files = [p.relative_to(dist_dir) for p in dist_dir.glob("lib/python*/lib-dynload/*.so") if not is_blacklisted(p)]
+    return ":".join(f'/pfm/py/{p}' for p in so_files)
+
+
 
 def load_image_vars(env: Env) -> dict[str, str]:
     runner = env.runner
@@ -25,7 +43,7 @@ def load_image_vars(env: Env) -> dict[str, str]:
         return {}
     
     template = jinja2.Template(vars_file.read_text())
-    rendered = template.render(env=env, project=env.project)
+    rendered = template.render(env=env, project=env.project, so_files=partial(so_files, env.project))
 
     lines = rendered.splitlines()
     vars = {}
@@ -85,14 +103,33 @@ class Env:
         mounts.append((root_path("src"), False))
 
         if self.image == Image.BUILD:
+            mounts.append((root_path('helpers'), False))
             mounts.append((self.project.path("py"), True))
             mounts.append((self.project.path("cpython"), True))
+            mounts.append((self.project.path('tools'), True))
             mounts.append((root_path("cache"), True))
         
+        if self.runner == Runner.PFRUN:
+            mounts.append((self.project.path('envs'), False))
+
         if self.image == Image.AFL:
             mounts.append((self.project.path('py'), False))
+            mounts.append((self.project.path('tools'), False))
+            mounts.append((root_path('helpers'), False))
+            mounts.append((self.project.path('inputs'), False))
+            mounts.append((self.project.path('outputs'), True))
+            mounts.append((self.project.path('logs'), True))
+            mounts.append((self.project.path('cores'), True))
 
-        # mounts.append((self.project.path("py"), False))
+        if self.image == Image.LLDB:
+            mounts.append((self.project.path('py'), False))
+            mounts.append((self.project.path('tools'), False))
+            mounts.append((root_path('helpers'), False))
+            mounts.append((self.project.path('inputs'), False))
+            mounts.append((self.project.path('logs'), False))
+            mounts.append((self.project.path('cores'), False))
+            mounts.append((self.project.path('artifacts'), True))
+
         return mounts
     
     async def run(self, cmd: list[str], **kwargs):

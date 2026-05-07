@@ -4,9 +4,10 @@ from pathlib import Path
 import sys
 import subprocess
 import re
+from hashlib import sha256
 
 TOOL_PATH = '/usr/bin'
-STATE_PATH = Path('/tmp/lto-wrap-state.json')
+STATE_PATH = Path('/pfm/py/lto-wrap-state.json')
 NO_AFL_BINARIES = {'Programs/_freeze_module', '_bootstrap_python', 'Programs/_testembed'}
 
 AFL_ALTERNATIVES = {
@@ -52,7 +53,10 @@ def get_output_file(args):
 
 
 def prepare(cmd, args, env):
+    use_asan = os.environ.get('AFL_USE_ASAN', '0') == '1'
     env['AFL_LLVM_LTO_DONTWRITEID'] = '1'
+    args_hash = sha256((cmd + ' ' + ' '.join(args) + ' ' + str(env)).encode()).hexdigest()
+    env['AFL_LLVM_DICT2FILE'] = f'/pfm/py/afl_dicts/{args_hash}.dict'
     # if we have '-c' followed by '-o' and the -o file is a .o file, then we are compiling an object file and should not do anything special
     if is_object_compile(cmd, args):
         return
@@ -60,7 +64,15 @@ def prepare(cmd, args, env):
     output_file = get_output_file(args)
     if output_file in NO_AFL_BINARIES:
         print(f"LTO WRAP: IGNORING for {output_file}", file=sys.stderr)
-        args[:0] = ['-flto=thin', '-fuse-ld=lld', '-O0', '-Wl,--thinlto-jobs=all', '-Wl,--thinlto-cache-dir=/pfm/cache/thinlto']
+        args[:0] = [
+            '-flto=thin', 
+            '-fuse-ld=lld', 
+            '-O0', 
+            '-Wl,--thinlto-jobs=all', 
+            '-Wl,--thinlto-cache-dir=/pfm/cache/thinlto',
+        ]
+        if use_asan:
+            args.append('-fsanitize=address')
         return AlternateBinary(AFL_ALTERNATIVES[cmd])
     
     state = load_state()
@@ -76,9 +88,10 @@ def prepare(cmd, args, env):
         print(f"\x1b[34mSTARTID={start_id}\x1b[0m", file=sys.stderr)
         return CAPTURE_EDGES
     
-    if output_file == 'python.exe':
+    if output_file in {'python.exe', '/pfm/tools/fuzz_python', '/pfm/tools/fuzz_peg', '/pfm/tools/fuzz_python.cmplog', '/pfm/tools/fuzz_peg.cmplog'}:
         del env['AFL_LLVM_LTO_DONTWRITEID']
         env['AFL_LLVM_LTO_STARTID'] = str(start_id)
+        print(f"\x1b[34mGENERATING EXECUTABLE STARTID={start_id}\x1b[0m", file=sys.stderr)
         return
     
     print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
@@ -95,11 +108,11 @@ def run_capture_edges(cmd_abs, args, env):
     # print(repr(result.stderr), file=sys.stderr)
 
     # Find: 'Instrumented N locations ' in stdout
-    matches = re.findall(r'Instrumented (\d+) locations', result.stdout)
+    matches = re.findall(r'Instrumented (\d+) locations', result.stderr)
     if not matches:
-        raise RuntimeError(f"Could not find 'Instrumented N locations' in output: {result.stdout}")
+        raise RuntimeError(f"Could not find 'Instrumented N locations' in output: {result.stdout}, stderr: {result.stderr}")
     if len(matches) > 1:
-        raise RuntimeError(f"Found multiple 'Instrumented N locations' in output: {result.stdout}")
+        raise RuntimeError(f"Found multiple 'Instrumented N locations' in output: {result.stdout}, stderr: {result.stderr}")
     
     num_edges = int(matches[-1])
     print(f"LTO WRAP: Captured {num_edges} edges", file=sys.stderr)
