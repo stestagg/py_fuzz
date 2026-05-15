@@ -120,6 +120,11 @@ class Env:
             mounts.append((self.project.path('outputs'), True))
             mounts.append((self.project.path('logs'), True))
             mounts.append((self.project.path('cores'), True))
+            if self.project.track_inputs:
+                input_tracks_dir = self.project.path("input_tracks")
+                if not input_tracks_dir.exists():
+                    input_tracks_dir.mkdir()
+                mounts.append((input_tracks_dir, True))
 
         if self.image == Image.LLDB:
             mounts.append((self.project.path('py'), False))
@@ -129,6 +134,11 @@ class Env:
             mounts.append((self.project.path('logs'), False))
             mounts.append((self.project.path('cores'), False))
             mounts.append((self.project.path('artifacts'), True))
+            if self.project.track_inputs:
+                mounts.append((self.project.path("input_tracks"), True))
+
+        if self.image == Image.BISECT:
+            mounts.append((self.project.path('bisect_script'), False))
 
         return mounts
     

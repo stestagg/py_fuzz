@@ -19,7 +19,7 @@ Run the frontend during development:
 ```sh
 cd src/ui
 pnpm install
-VITE_PYFUZZ_WS_URL=ws://localhost:8765/ws pnpm dev
+VITE_PYFUZZ_WS_URL=ws://localhost:8767/ws pnpm dev
 ```
 
 For a built UI served by the backend:

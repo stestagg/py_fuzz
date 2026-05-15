@@ -1,8 +1,13 @@
 #define _GNU_SOURCE
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
 #define TEST_CRASH_INPUT     "fuzztestcrash"
 #define TEST_CRASH_INPUT_LEN 13
@@ -174,7 +179,7 @@ int main(int argc, char **argv) {
     PyConfig_InitIsolatedConfig(&config);
     config.install_signal_handlers = 0;
     config.write_bytecode = 0;
-    #ifdef Py_DEBUG
+    #ifdef Py_DEBUG_PARSER
     config.parser_debug = 1;
     #endif
 
@@ -288,6 +293,18 @@ int main(int argc, char **argv) {
 
     /* Read once before the forkserver so all forked children inherit the value. */
     int test_crash_mode = (getenv("FUZZ_TEST_CRASH") != NULL);
+    const char *track_inputs_base = getenv("FUZZ_TRACK_INPUTS");
+    int do_track_inputs = track_inputs_base != NULL;
+    if (do_track_inputs) {
+        printf("FUZZ_TRACK_INPUTS is set, fuzz inputs will be saved to subdirectories of: %s\n", track_inputs_base);
+        int mkdir_result = mkdir(track_inputs_base, 0755);
+        if (mkdir_result != 0 && errno != EEXIST) {
+            printf("FUZZ_TRACK_INPUTS is set but failed to create directory: %s\n", track_inputs_base);
+            abort();
+        }
+    } else {
+        printf("FUZZ_TRACK_INPUTS is not set, fuzz inputs will not be saved to disk.\n");
+    }
 
     /*
      * Deferred forkserver starts here, after Python init and warm-up.
@@ -295,6 +312,19 @@ int main(int argc, char **argv) {
 #ifdef __AFL_HAVE_MANUAL_CONTROL
     __AFL_INIT();
 #endif
+
+    char track_dir[4096] = {0};
+    if (do_track_inputs) {
+        pid_t  pid = getpid();
+        time_t ts  = time(NULL);
+        snprintf(track_dir, sizeof(track_dir),
+                 "%s/%d.%ld", track_inputs_base, (int)pid, (long)ts);
+        printf("FUZZ_TRACK_INPUTS: Tracking fuzz inputs in: %s\n", track_dir);
+        if (mkdir(track_dir, 0755) != 0) {
+            printf("FUZZ_TRACK_INPUTS is set but failed to create directory: %s\n", track_dir);
+            abort();
+        }
+    }
 
     unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
     unsigned long iter = 0;
@@ -311,6 +341,16 @@ int main(int argc, char **argv) {
         if (test_crash_mode &&
                 memmem(buf, (size_t)len, TEST_CRASH_INPUT, TEST_CRASH_INPUT_LEN)) {
             abort();
+        }
+
+        if (do_track_inputs) {
+            char fpath[sizeof(track_dir) + 32];
+            snprintf(fpath, sizeof(fpath), "%s/%lu", track_dir, iter);
+            FILE *tf = fopen(fpath, "wb");
+            if (tf) {
+                fwrite(buf, 1, (size_t)len, tf);
+                fclose(tf);
+            }
         }
 
         /*
@@ -356,7 +396,7 @@ int main(int argc, char **argv) {
          * some common persistent-mode contamination at moderate cost.
          */
         if (PyErr_Occurred()) {
-            PyErr_Print();
+            PyErr_Clear();
         }
 
         if (MODULE_CLEANUP_EVERY > 0 && (iter % MODULE_CLEANUP_EVERY) == 0) {
@@ -370,7 +410,5 @@ int main(int argc, char **argv) {
         free(src);
     }
 
-    Py_XDECREF(g_baseline_modules);
-    Py_XDECREF(g_baseline_builtins);
     return 0;
 }

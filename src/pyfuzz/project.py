@@ -2,7 +2,7 @@
 from pathlib import Path
 from dataclasses import asdict, dataclass
 import json
-from .paths import PROJECT_ROOT, project_path
+from . import paths
 
 DEFAULT_REPO = "python/cpython"
 
@@ -22,6 +22,9 @@ class Project:
     fuzz_peg: bool = False
     py_configure_extra_args: str = ""
     py_debug: bool = False
+    cmplog: bool = False
+    fuzz_env: tuple[str] = ()
+    track_inputs: bool = False
 
     _name: str = None
 
@@ -41,7 +44,7 @@ class Project:
 
     @property
     def config_path(self) -> Path:
-        return project_path(self.name, "config", "project.json")
+        return paths.project_path(self.name, "config", "project.json")
 
     def save(self):
         self.config_path.write_text(json.dumps(asdict(self), indent=2, sort_keys=True) + "\n")
@@ -50,7 +53,7 @@ class Project:
     @classmethod
     def load(cls, name: str) -> Project:
         assert name is not None, "Project name must be provided"
-        root = project_path(name)
+        root = paths.project_path(name)
         if not root.exists():
             raise FileNotFoundError(f"Unknown project '{name}'")
         config_path = root / "config" / "project.json"
@@ -64,7 +67,7 @@ class Project:
     
     @classmethod
     def create(cls, name: str) -> Project:
-        root = project_path(name)
+        root = paths.project_path(name)
         if root.exists():
             raise FileExistsError(f"Project already exists: {name}")
         config_path = root / "config" / "project.json"
@@ -77,10 +80,10 @@ class Project:
     
     @classmethod
     def projects(cls) -> set[str]:
-        return {p.parent.parent.name for p in PROJECT_ROOT.glob("*/config/project.json")}
+        return {p.parent.parent.name for p in paths.PROJECT_ROOT.glob("*/config/project.json")}
     
     def path(self, *parts: str) -> Path:
-        return project_path(self.name, *parts)
+        return paths.project_path(self.name, *parts)
 
     @property
     def fuzz_target(self) -> str:

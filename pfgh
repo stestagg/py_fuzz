@@ -1,0 +1,17 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = [
+#   "pyfuzz",
+#   "PyGithub",
+#   "pandas",
+#   "openai",
+#   "tabulate",
+#   "tqdm",
+# ]
+# [tool.uv.sources]
+# pyfuzz = { path = ".", editable=true }
+# ///
+from pyfuzz.pfgh import cli
+
+if __name__ == "__main__":
+    cli.cli()

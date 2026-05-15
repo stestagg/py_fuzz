@@ -22,6 +22,7 @@ if str(PYTHON_SRC) not in sys.path:
 from pyfuzz.project import Project  # noqa: E402
 from pyfuzz.analysis import list_artifacts, sync_artifacts, get_artifact, Artifact  # noqa: E402
 from pyfuzz.summary import summarize_fuzzing  # noqa: E402
+from pyfuzz.lldb import analyze_core  # noqa: E402
 
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -108,6 +109,71 @@ def artifact_payload(artifact: Artifact) -> dict[str, Any]:
         "path": str(artifact.dir),
         "hasInput": input_path.exists(),
         "inputSize": input_path.stat().st_size if input_path.exists() else None,
+    }
+
+
+def read_artifact_files(artifact: Artifact, project: Project) -> list[dict[str, Any]]:
+    project_root = artifact.dir.parents[1].resolve()
+    files = []
+    for path in sorted(artifact.dir.iterdir()):
+        if path.name == "meta.json":
+            continue
+        if path.is_symlink():
+            resolved = (path.parent / path.readlink()).resolve()
+            try:
+                display_target = str(resolved.relative_to(project_root))
+            except ValueError:
+                display_target = str(path.readlink())
+            lldb_command = None
+            if path.name == "core":
+                core_rel = resolved.relative_to(project.path("cores"))
+                lldb_command = f"lldb -c /pfm/cores/{core_rel} {project.fuzz_target}"
+            files.append({
+                "name": path.name,
+                "symlink": display_target,
+                "preview": None,
+                "previewComplete": False,
+                "isBinary": False,
+                "lldbCommand": lldb_command,
+            })
+        elif path.suffix == ".txt":
+            text = path.read_text("utf-8", errors="replace")
+            lines = text.splitlines()
+            files.append({
+                "name": path.name,
+                "symlink": None,
+                "preview": "\n".join(lines[:10]),
+                "previewComplete": len(lines) <= 10,
+                "isBinary": False,
+            })
+        else:
+            try:
+                text = path.read_text("utf-8")
+                lines = text.splitlines()
+                files.append({
+                    "name": path.name,
+                    "symlink": None,
+                    "preview": "\n".join(lines[:10]),
+                    "previewComplete": len(lines) <= 10,
+                    "isBinary": False,
+                })
+            except (UnicodeDecodeError, IsADirectoryError):
+                files.append({
+                    "name": path.name,
+                    "symlink": None,
+                    "preview": None,
+                    "previewComplete": False,
+                    "isBinary": True,
+                })
+    return files
+
+
+def artifact_detail_payload(artifact: Artifact, project: Project) -> dict[str, Any]:
+    return {
+        "hash": artifact.hash,
+        "type": artifact.type.value,
+        "meta": artifact.meta,
+        "files": read_artifact_files(artifact, project),
     }
 
 
@@ -214,17 +280,22 @@ class DashboardSocket:
         if message_type == "artifact:get":
             artifact_hash = str(message.get("hash") or "")
             artifact = get_artifact(self.project, artifact_hash)
-            input_bytes = artifact.input
-            return {
-                "hash": artifact.hash,
-                "type": artifact.type.value,
-                "input": input_bytes.decode("utf-8", errors="replace") if input_bytes is not None else None,
-                "lldbOutput": artifact.lldb_output,
-                "linkedCrash": artifact.meta.get("linked_crash"),
-                "linkedCore": artifact.meta.get("linked_core"),
-                "worker": artifact.meta.get("worker"),
-                "sourceFilename": artifact.meta.get("source_filename"),
-            }
+            return artifact_detail_payload(artifact, self.project)
+
+        if message_type == "artifact:run-lldb":
+            artifact_hash = str(message.get("hash") or "")
+            await analyze_core(self.project, artifact_hash)
+            artifact = get_artifact(self.project, artifact_hash)
+            return artifact_detail_payload(artifact, self.project)
+
+        if message_type == "artifact:file":
+            artifact_hash = str(message.get("hash") or "")
+            filename = str(message.get("filename") or "")
+            artifact = get_artifact(self.project, artifact_hash)
+            file_path = (artifact.dir / filename).resolve()
+            if not str(file_path).startswith(str(artifact.dir.resolve())):
+                raise ValueError("Invalid filename")
+            return {"content": file_path.read_text("utf-8", errors="replace")}
 
         raise ValueError(f"Unsupported message type: {message_type}")
 
@@ -394,7 +465,7 @@ def resolve_static_file(path: str) -> Path | None:
 
 
 def config_script(host_header: str, cli_project: str | None) -> bytes:
-    host = host_header or "localhost:8765"
+    host = host_header or "localhost:8767"
     config = {
         "wsUrl": f"ws://{host}/ws",
         "initialProject": cli_project,
@@ -496,7 +567,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("project_name", nargs="?", help="Project to select on connect.")
     parser.add_argument("--project", dest="project_option", help="Project to select on connect.")
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind.")
-    parser.add_argument("--port", type=int, default=8765, help="Port to bind.")
+    parser.add_argument("--port", type=int, default=8767, help="Port to bind.")
     return parser.parse_args()
 
 

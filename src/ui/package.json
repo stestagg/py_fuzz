@@ -5,9 +5,9 @@
   "type": "module",
   "packageManager": "pnpm@10.10.0",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173",
+    "dev": "vite --host 127.0.0.1 --port 5174",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1 --port 4174"
   },
   "dependencies": {
     "lucide-react": "^0.577.0",

@@ -32,15 +32,20 @@ type ArtifactPayload = {
   inputSize: number | null;
 };
 
+type ArtifactFile = {
+  name: string;
+  symlink: string | null;
+  preview: string | null;
+  previewComplete: boolean;
+  isBinary: boolean;
+  lldbCommand?: string | null;
+};
+
 type ArtifactDetail = {
   hash: string;
   type: "crash" | "core";
-  input: string | null;
-  lldbOutput: string | null;
-  linkedCrash: string | null;
-  linkedCore: string | null;
-  worker: string | null;
-  sourceFilename: string | null;
+  meta: Record<string, unknown>;
+  files: ArtifactFile[];
 };
 
 type ArtifactsListResult = {
@@ -92,7 +97,7 @@ function wsUrl() {
     return configured;
   }
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.hostname}:8765/ws`;
+  return `${protocol}//${window.location.hostname}:8767/ws`;
 }
 
 function formatValue(value: string | number | boolean | null | undefined) {
@@ -143,6 +148,8 @@ function App() {
   const [selectedArtifactHash, setSelectedArtifactHash] = useState<string | null>(null);
   const [artifactDetail, setArtifactDetail] = useState<ArtifactDetail | null>(null);
   const [artifactDetailLoading, setArtifactDetailLoading] = useState(false);
+  const [lldbRunning, setLldbRunning] = useState(false);
+  const [expandedFiles, setExpandedFiles] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const socket = new WebSocket(wsUrl());
@@ -267,9 +274,23 @@ function App() {
     }
   }, [sendRequest]);
 
+  const runLldb = useCallback(async (hash: string) => {
+    setLldbRunning(true);
+    setError(null);
+    try {
+      const detail = await sendRequest("artifact:run-lldb", { hash }) as ArtifactDetail;
+      setArtifactDetail(detail);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLldbRunning(false);
+    }
+  }, [sendRequest]);
+
   const selectArtifact = useCallback(async (hash: string) => {
     setSelectedArtifactHash(hash);
     setArtifactDetailLoading(true);
+    setExpandedFiles({});
     try {
       const detail = await sendRequest("artifact:get", { hash }) as ArtifactDetail;
       setArtifactDetail(detail);
@@ -278,6 +299,11 @@ function App() {
     } finally {
       setArtifactDetailLoading(false);
     }
+  }, [sendRequest]);
+
+  const loadFullFile = useCallback(async (hash: string, filename: string) => {
+    const data = await sendRequest("artifact:file", { hash, filename }) as { content: string };
+    setExpandedFiles(prev => ({ ...prev, [filename]: data.content }));
   }, [sendRequest]);
 
   useEffect(() => {
@@ -374,6 +400,10 @@ function App() {
               detail={artifactDetail}
               loading={artifactDetailLoading}
               onSelect={selectArtifact}
+              onRunLldb={(hash) => void runLldb(hash)}
+              lldbRunning={lldbRunning}
+              expandedFiles={expandedFiles}
+              onLoadFile={(filename) => void loadFullFile(selectedArtifactHash!, filename)}
             />
           )}
         </section>
@@ -518,7 +548,15 @@ function CopiableText({ text }: { text: string }) {
   );
 }
 
-function ArtifactDetailView({ detail, loading, onSelect }: { detail: ArtifactDetail | null; loading: boolean; onSelect: (hash: string) => void }) {
+function ArtifactDetailView({ detail, loading, onSelect, onRunLldb, lldbRunning, expandedFiles, onLoadFile }: {
+  detail: ArtifactDetail | null;
+  loading: boolean;
+  onSelect: (hash: string) => void;
+  onRunLldb: (hash: string) => void;
+  lldbRunning: boolean;
+  expandedFiles: Record<string, string>;
+  onLoadFile: (filename: string) => void;
+}) {
   if (loading) {
     return (
       <div className="detail-stack">
@@ -533,50 +571,98 @@ function ArtifactDetailView({ detail, loading, onSelect }: { detail: ArtifactDet
     return null;
   }
 
-  const linkedHash = detail.linkedCrash ?? detail.linkedCore;
-  const linkedLabel = detail.linkedCrash ? "linked crash" : detail.linkedCore ? "linked core" : null;
-
   return (
     <div className="detail-stack">
-      <div className="detail-card">
-        <div className="detail-card-title">
-          <CopiableText text={detail.hash} />
-          <span className={`detail-type-badge detail-type-${detail.type}`}>({detail.type})</span>
-          {detail.sourceFilename != null && (
-            <span className="detail-source-filename">{detail.sourceFilename.split("/").pop()}</span>
-          )}
-        </div>
-        {(detail.worker != null || detail.sourceFilename != null) && (
-          <div className="detail-source-meta">
-            {detail.worker != null && (
-              <span className="detail-source-row">
-                <span className="detail-source-label">worker</span>
-                <CopiableText text={detail.worker} />
-              </span>
-            )}
-            {detail.sourceFilename != null && (
-              <span className="detail-source-row">
-                <span className="detail-source-label">file</span>
-                <CopiableText text={detail.sourceFilename} />
-              </span>
+      <ArtifactMetaCard detail={detail} onSelect={onSelect} onRunLldb={onRunLldb} lldbRunning={lldbRunning} />
+      {detail.files.map((file) => (
+        <ArtifactFileCard
+          key={file.name}
+          file={file}
+          expandedContent={expandedFiles[file.name]}
+          onLoadFull={() => onLoadFile(file.name)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ArtifactMetaCard({ detail, onSelect, onRunLldb, lldbRunning }: {
+  detail: ArtifactDetail;
+  onSelect: (hash: string) => void;
+  onRunLldb: (hash: string) => void;
+  lldbRunning: boolean;
+}) {
+  return (
+    <div className="detail-card">
+      <div className="detail-card-title">
+        <CopiableText text={detail.hash} />
+        <span className={`detail-type-badge detail-type-${detail.type}`}>({detail.type})</span>
+        <button
+          type="button"
+          className="detail-run-lldb-button"
+          onClick={() => onRunLldb(detail.hash)}
+          disabled={lldbRunning}
+        >
+          {lldbRunning ? "Running…" : "Run LLDB"}
+        </button>
+      </div>
+      <div className="detail-meta-rows">
+        {Object.entries(detail.meta).map(([key, value]) => (
+          <div className="detail-meta-row" key={key}>
+            <span className="detail-meta-label">{key}</span>
+            {(key === "linked_crash" || key === "linked_core") && typeof value === "string" ? (
+              <button type="button" className="detail-meta-link" onClick={() => onSelect(value)}>
+                {value}
+              </button>
+            ) : (
+              <span className="detail-meta-value">{value == null ? "—" : String(value)}</span>
             )}
           </div>
-        )}
-        {linkedHash && (
-          <button type="button" className="detail-linked-artifact" onClick={() => onSelect(linkedHash)}>
-            {linkedLabel}: {linkedHash}
-          </button>
-        )}
-        {detail.input != null && <>
-          <div className="detail-field-label">Input</div>
-          <pre className="detail-input-block"><code>{detail.input}</code></pre>
-        </>}
+        ))}
       </div>
-      {detail.lldbOutput != null && (
-        <div className="detail-card">
-          <div className="detail-field-label">LLDB</div>
-          <pre className="detail-input-block"><code>{detail.lldbOutput}</code></pre>
+    </div>
+  );
+}
+
+function ArtifactFileCard({ file, expandedContent, onLoadFull }: {
+  file: ArtifactFile;
+  expandedContent: string | undefined;
+  onLoadFull: () => void;
+}) {
+  if (file.symlink !== null) {
+    return (
+      <div className="detail-card">
+        <div className="detail-symlink-line">
+          <span className="detail-meta-label">{file.name}</span>
+          <span className="detail-symlink-arrow">→</span>
+          <code className="detail-symlink-target">{file.symlink}</code>
         </div>
+        {file.lldbCommand && (
+          <div className="detail-cmd-box">
+            <CopiableText text={file.lldbCommand} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (file.isBinary) {
+    return (
+      <div className="detail-card">
+        <div className="detail-field-label">{file.name}</div>
+        <span className="detail-binary-note">(binary file)</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="detail-card">
+      <div className="detail-field-label">{file.name}</div>
+      <pre className="detail-input-block"><code>{expandedContent ?? file.preview ?? ""}</code></pre>
+      {!file.previewComplete && expandedContent === undefined && (
+        <button type="button" className="detail-load-btn" onClick={onLoadFull}>
+          Load full
+        </button>
       )}
     </div>
   );

@@ -50,7 +50,7 @@ class Artifact:
 def _iter_sources(project: Project):
     cores_dir = project.path("cores")
     if cores_dir.exists():
-        for f in cores_dir.iterdir():
+        for f in cores_dir.rglob("*"):
             if f.is_file():
                 yield f, ArtifactType.CORE
 

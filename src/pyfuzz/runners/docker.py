@@ -65,10 +65,10 @@ async def docker_run(
         else:
             docker_cmd.extend(["-v", f'{mount_dir}:{mount_name}:ro'])
     
-    docker_cmd += [
-        image_name,
-        "sh", "-c", cmd_str
-    ]
+    if cmd:
+        docker_cmd += [image_name, "sh", "-c", cmd_str]
+    else:
+        docker_cmd.append(image_name)
     
     pipe_val = None if console else subprocess.PIPE
     print(f"Running docker command: {' '.join(shlex.quote(part) for part in docker_cmd)}")

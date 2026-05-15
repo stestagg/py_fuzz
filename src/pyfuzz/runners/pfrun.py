@@ -1,6 +1,7 @@
 import asyncio
 import shlex
 import subprocess
+import odhash
 
 from ..env import Env, Runner
 from ..paths import root_path
@@ -26,14 +27,17 @@ async def pf_run(
     vm_mem = vm_mem or env.project.vm_mem
 
     export_script = env.shell_export
-    (env.project.path("envs") / f'{env.image.value}.env').write_text(export_script + "\n")
-
-    env_file = f"/pfm/envs/{env.image.value}.env"
 
     cmd_str = shlex.join(str(part) for part in cmd)
 
-    pf_cmd = [
+    env_key = [cmd_str] + env.shell_sets
+    env_hash = odhash.hash(".".join(env_key))
+    
+    (env.project.path("envs") / f'{env_hash}.env').write_text(export_script + "\n")
 
+    env_file = f"/pfm/envs/{env_hash}.env"
+
+    pf_cmd = [
         str(PFRUN_BINARY),
         f'--imagedir', image_dir,
         f'--ncpu', str(ncpu),
@@ -55,6 +59,9 @@ async def pf_run(
         console = True
 
     pipe_val = None if console else subprocess.PIPE 
+
+    pf_cmd_str = shlex.join(str(p) for p in pf_cmd)
+    print(f'Running command in pfrun: {pf_cmd_str}')
 
     proc = await asyncio.create_subprocess_exec(
         *pf_cmd,

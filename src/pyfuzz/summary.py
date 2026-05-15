@@ -39,7 +39,7 @@ def summarize_fuzzing(project: Project) -> dict:
             crashes += sum(1 for f in crash_dir.iterdir() if f.name != "README.txt")
 
     # Count core dumps
-    core_dumps = sum(1 for f in cores_dir.iterdir()) if cores_dir.exists() else 0
+    core_dumps = sum(1 for f in cores_dir.rglob("*") if f.is_file()) if cores_dir.exists() else 0
 
     return {
         "project": project.name,

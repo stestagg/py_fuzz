@@ -315,6 +315,8 @@ button {
 .detail-panel {
   background: transparent;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .artifact-tree {
@@ -435,6 +437,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  flex: 1;
+  min-height: 0;
 }
 
 .detail-card {
@@ -444,9 +448,21 @@ button {
   padding: 12px 14px;
 }
 
+.detail-card-grow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.detail-card-grow .detail-input-block {
+  flex: 1;
+  max-height: none;
+}
+
 .detail-card-title {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -466,7 +482,7 @@ button {
 
 .copiable-text-value {
   font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: #172026;
   overflow-wrap: anywhere;
@@ -553,7 +569,7 @@ button {
 }
 
 .detail-field-label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -568,7 +584,7 @@ button {
   border: 1px solid var(--border);
   border-radius: 6px;
   font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.6;
   overflow-x: auto;
   white-space: pre-wrap;
@@ -579,8 +595,127 @@ button {
 
 .detail-loading {
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: 12px;
   padding: 8px 0;
+}
+
+.detail-run-lldb-button {
+  margin-left: auto;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.detail-run-lldb-button:hover {
+  background: #e7f3ef;
+  border-color: #b8d9d0;
+}
+
+.detail-run-lldb-button:disabled {
+  cursor: default;
+  color: var(--text-muted);
+  background: var(--panel-soft);
+  border-color: var(--border);
+}
+
+.detail-meta-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detail-meta-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.detail-meta-value {
+  font-size: 11px;
+  color: #2d4049;
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.detail-meta-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.detail-meta-link:hover {
+  text-decoration: underline;
+}
+
+.detail-load-btn {
+  display: block;
+  margin: 8px auto 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  text-align: center;
+}
+
+.detail-load-btn:hover {
+  text-decoration: underline;
+}
+
+.detail-cmd-box {
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.detail-symlink-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.detail-symlink-arrow {
+  color: var(--text-muted);
+}
+
+.detail-symlink-target {
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+  color: #2d4049;
+  overflow-wrap: anywhere;
+}
+
+.detail-binary-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 @media (max-width: 800px) {

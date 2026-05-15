@@ -52,18 +52,21 @@ sed -i 's|^\(\$(BUILDPYTHON):[[:space:]]*Programs/python\.o[[:space:]]\+\$(LINK_
 
 make -j1 install
 
-export AFL_LLVM_CMPLOG=1
-export LTOWRAP_ENABLE=0
+if [ $PY_FUZZ_CMPLOG = "1" ]; then
 
-mkdir "$INSTALL_ROOT/cmplog"
-touch Programs/_freeze_module.o
-./configure --prefix="$INSTALL_ROOT/cmplog" \
-            --disable-shared \
-            --without-ensurepip \
-            --disable-test-modules \
-            --without-doc-strings
-export LTOWRAP_ENABLE=1
-if [ -e /tmp/ltowrap.json ]; then
-    rm /tmp/ltowrap.json
+    export AFL_LLVM_CMPLOG=1
+    export LTOWRAP_ENABLE=0
+
+    mkdir "$INSTALL_ROOT/cmplog"
+    touch Programs/_freeze_module.o
+    ./configure --prefix="$INSTALL_ROOT/cmplog" \
+                --disable-shared \
+                --without-ensurepip \
+                --disable-test-modules \
+                --without-doc-strings
+    export LTOWRAP_ENABLE=1
+    if [ -e /tmp/ltowrap.json ]; then
+        rm /tmp/ltowrap.json
+    fi
+    make -j4 -o Programs/_freeze_module -o _bootstrap_python -o Programs/_testembed install
 fi
-make -j4 -o Programs/_freeze_module -o _bootstrap_python -o Programs/_testembed install
