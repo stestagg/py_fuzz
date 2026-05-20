@@ -301,6 +301,60 @@ Example command shapes:
 Relevance to reproduction: it exposes the same mounted project environment as
 the canned analysis commands while leaving the invoked command open-ended.
 
+## `run-dist SCRIPT`
+
+```sh
+./pfx run-dist <script.py>
+./pfx run-dist <script.py> --ref <cpython-ref>
+./pfx run-dist <script.py> --debug
+./pfx run-dist <script.py> --env KEY=VALUE
+./pfx run-dist <script.py> --configure-args '<extra configure args>'
+./pfx run-dist <script.py> --interactive
+```
+
+Builds or reuses a more standard CPython build, then runs a supplied Python
+script against it. The command copies the script into:
+
+```sh
+projects/<project>/dist_script/
+```
+
+and uses cached CPython installs under:
+
+```sh
+cache/dist-builds/
+```
+
+The build is keyed by the resolved CPython commit, whether `--debug` is set,
+and the configure arguments. `--ref` selects the CPython ref to build, defaulting
+to `main`. `--debug` adds `--with-pydebug`. `--env KEY=VALUE` passes script
+environment variables through to the run. `--interactive` prepares or reuses the
+build, prints the Python command it would run, and opens a shell with useful
+environment variables such as `PYTHON`, `DIST_BUILD_ROOT`, `DIST_SCRIPT`, and
+`DIST_COMMAND`.
+
+Relevant output:
+
+- A copied script under `projects/<project>/dist_script/`
+- A cached CPython install under `cache/dist-builds/`
+- The resolved CPython commit and build-cache path
+- The script's exit status when run under the built Python
+
+Example command shapes:
+
+```sh
+./pfx run-dist projects/prs-3/config/repro-accessories-flea-alot-mistook.py
+./pfx run-dist projects/<project>/config/repro-1.py --ref v3.14.0a7
+./pfx run-dist projects/<project>/config/repro-1.py --debug
+./pfx run-dist projects/<project>/config/repro-1.py --env PYTHONMALLOC=debug
+./pfx run-dist projects/<project>/config/repro-1.py --interactive
+```
+
+Relevance to reproduction: this is the verification tool for reproducers. It
+checks whether a script that was derived from fuzzing artifacts still fails
+against a more conventional CPython build, rather than only inside the fuzzing
+harness, LLDB image, or persistent AFL environment.
+
 ## `bisect SCRIPT`
 
 ```sh
@@ -383,4 +437,3 @@ Example command shape:
 Relevance to reproduction: it records the environment assumptions behind the
 artifacts: sanitizer mode, memory limits, timeouts, target selection, custom
 environment variables, input tracking, and build flags.
-

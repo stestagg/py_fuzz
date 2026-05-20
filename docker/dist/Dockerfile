@@ -1,8 +1,7 @@
 FROM ogarcia/archlinux:devel
 
 RUN pacman -Sy --noconfirm \
-        clang \
-        ccache \
+        ca-certificates \
         git \
         bzip2 \
         libffi \
@@ -15,10 +14,8 @@ RUN pacman -Sy --noconfirm \
         libxml2 \
         libxslt \
         zstd \
-        llvm \
         make \
         python \
-        python-pip \
         tk \
         zlib
 
@@ -27,11 +24,6 @@ WORKDIR /src
 
 RUN git clone https://github.com/python/cpython /src/cpython
 
-COPY bisect.sh /bisect.sh
-RUN chmod +x /bisect.sh
+COPY run_dist.py /src/run_dist.py
 
-COPY run_bisect.py /src/run_bisect.py
-
-RUN pip install questionary rich
-
-ENTRYPOINT ["python", "/src/run_bisect.py"]
+ENTRYPOINT ["python", "/src/run_dist.py"]

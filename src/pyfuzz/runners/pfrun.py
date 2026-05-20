@@ -20,7 +20,7 @@ async def pf_run(
 ):
     assert env.runner == Runner.PFRUN
     
-    image_dir = PFRUN_DIR / env.image.value
+    image_dir = PFRUN_DIR / "images" / env.image.value
     assert image_dir.exists(), f"No pfrun image found for env type: {env.image}"
 
     ncpu = ncpu or env.project.ncpu
@@ -57,6 +57,7 @@ async def pf_run(
 
     if interactive:
         console = True
+        pf_cmd.append('--interactive')
 
     pipe_val = None if console else subprocess.PIPE 
 

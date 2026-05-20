@@ -126,10 +126,14 @@ def run_capture_edges(cmd_abs, args, env):
 def main(cmd, args):
     is_enabled = os.environ.get('LTOWRAP_ENABLE', '1') == '1'
     env = os.environ.copy()
-    
+
     res = None
     if is_enabled:
         res = prepare(cmd, args, env)
+    else:
+        # Use plain clang when disabled (e.g. during ./configure) so AFL's
+        # hardcoded --ld-path= isn't passed to the compiler.
+        cmd = AFL_ALTERNATIVES.get(cmd, cmd)
 
     if isinstance(res, AlternateBinary):
         cmd = str(res)

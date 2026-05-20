@@ -1,0 +1,55 @@
+#!/bin/sh
+
+set -u
+
+cmdline="$(cat /proc/cmdline)"
+
+case " $cmdline " in
+    *" pfmscript="*)
+        script_b64="$(printf '%s\n' "$cmdline" | sed -n 's/.*pfmscript=\([^ ]*\).*/\1/p')"
+        script_cmd="$(printf '%s' "$script_b64" | base64 -d 2>/dev/null)"
+        decode_status=$?
+
+        if [ "$decode_status" -eq 0 ] && [ -n "$script_cmd" ]; then
+            case " $cmdline " in
+                *" pfmenv="*)
+                    env_file="$(printf '%s\n' "$cmdline" | sed -n 's/.*pfmenv=\([^ ]*\).*/\1/p')"
+                    if [ -f "$env_file" ]; then
+                        . "$env_file"
+                    else
+                        echo "[PFM] env file not found: $env_file" > /dev/hvc0
+                    fi
+                    ;;
+            esac
+
+            case " $cmdline " in
+                *" pfminteractive=1 "*)
+                    echo "[PFM] starting interactive command: $script_cmd" > /dev/hvc0
+                    mkdir -p /dev/pts
+                    mount -t devpts devpts /dev/pts 2>/dev/null || true
+                    # setsid creates a new session; cttyhack then claims hvc0 as the
+                    # controlling terminal (TIOCSCTTY) and execs the command.  Without
+                    # this, Ctrl-C doesn't reach child processes and terminal state
+                    # changes by programs like vi bleed into the parent shell on exit.
+                    setsid cttyhack sh -lc "$script_cmd" < /dev/hvc0 > /dev/hvc0 2>&1
+                    ;;
+                *)
+                    echo "[PFM] running command: $script_cmd" > /dev/hvc0
+                    sh -c "$script_cmd" > /dev/hvc0 2>&1
+                    ;;
+            esac
+            cmd_status=$?
+            echo "[PFM] command ended with status: $cmd_status" > /dev/hvc0
+
+            echo "[PFM] powering off after command" > /dev/hvc0
+            if command -v poweroff >/dev/null 2>&1; then
+                poweroff -f > /dev/hvc0 2>&1 || poweroff > /dev/hvc0 2>&1
+            elif command -v halt >/dev/null 2>&1; then
+                halt -f > /dev/hvc0 2>&1 || halt > /dev/hvc0 2>&1
+            fi
+            exit "$cmd_status"
+        else
+            echo "[PFM] invalid pfmscript payload" > /dev/hvc0
+        fi
+        ;;
+esac

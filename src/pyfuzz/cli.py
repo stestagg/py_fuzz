@@ -131,12 +131,28 @@ def fuzz(ctx, instances, no_monitor, afl_debug, no_notify):
     project = Project.load(ctx.obj["project"])
 
     async def run_all():
+        worker_ids = ['main' if i == 0 else f'w{i}' for i in range(instances)]
         tasks = [asyncio.create_task(run_fuzz(project, i, afl_debug=afl_debug)) for i in range(instances)]
+
+        def _on_done(task, worker_id):
+            if task.cancelled():
+                click.echo(f"[fuzz] worker {worker_id} cancelled")
+            elif task.exception():
+                click.echo(f"[fuzz] worker {worker_id} failed: {task.exception()}", err=True)
+            else:
+                click.echo(f"[fuzz] worker {worker_id} finished")
+
+        for task, wid in zip(tasks, worker_ids):
+            task.add_done_callback(lambda t, wid=wid: _on_done(t, wid))
+
         monitor_task = None if no_monitor else asyncio.create_task(
             monitor_loop(project, get_running_workers=lambda: sum(1 for t in tasks if not t.done()), notify=not no_notify)
         )
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for task, wid in zip(tasks, worker_ids):
+                if not task.cancelled() and task.exception():
+                    raise task.exception()
         except asyncio.CancelledError:
             for t in tasks:
                 t.cancel()
@@ -279,6 +295,36 @@ def analyze_query(ctx, clauses):
         raise click.UsageError(str(e))
     for artifact in results:
         click.echo(artifact.hash)
+
+
+@cli.command("run-dist")
+@click.argument("script", type=click.Path(exists=True, path_type=Path))
+@click.option("--ref", "ref", default="main", show_default=True, help="CPython ref to build and run against.")
+@click.option("--interactive", is_flag=True, default=False, help="Build or reuse Python, print the command, then open a shell.")
+@click.option("--debug", is_flag=True, default=False, help="Build CPython with --with-pydebug.")
+@click.option("--env", "env_vars", multiple=True, metavar="KEY=VALUE", help="Environment variable to pass to the script.")
+@click.option("--configure-args", default="", help="Extra arguments to pass to CPython ./configure.")
+@click.pass_context
+def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args):
+    from .dist import run_dist
+    project = Project.load(ctx.obj["project"])
+    try:
+        rc = asyncio.run(
+            run_dist(
+                project,
+                script,
+                ref=ref,
+                interactive=interactive,
+                debug=debug,
+                env_vars=env_vars,
+                configure_args=configure_args,
+            )
+        )
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    raise SystemExit(rc)
 
 
 @cli.command("bisect")

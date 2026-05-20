@@ -1,16 +1,38 @@
-python/
-analysis/
-output/
-testcases/local/
+# OS files
+.DS_Store
+
+# Python artifacts
+*.egg-info/
 *.pyc
 __pycache__/
-dist/
-projects/*
+
+# Local environments and caches
 .venv/
 .uv-pfrun-cache/
-pfrun/*/fs.img
 .claude/
 cache/
-*.egg-info/
-old/
+
+# Generated analysis/output directories
+analysis/
+output/
+
+# Tooling/project workdirs
 gh/
+old/
+projects/*
+python/
+testcases/local/
+
+# Build outputs
+dist/
+!docker/dist/
+!docker/dist/Dockerfile
+!docker/dist/run_dist.py
+
+# pfrun artifacts
+pfrun/.pacman-cache/
+pfrun/.pfrun-build/
+pfrun/images/*/fs.img
+pfrun/images/*/vmlinux
+pfrun/images/*/initram
+pfrun/pfrun

@@ -11,7 +11,7 @@ class Runner(Enum):
     PFRUN = "pfrun"
 
 
-PFRUN_IMAGES = [p.name for p in root_path("pfrun").iterdir() if p.is_dir()]
+PFRUN_IMAGES = [p.name for p in (root_path("pfrun") / "images").iterdir() if p.is_dir()]
 DOCKER_IMAGES = [p.name for p in root_path("docker").iterdir() if p.is_dir()]
 
 
@@ -37,7 +37,7 @@ def so_files(project):
 def load_image_vars(env: Env) -> dict[str, str]:
     runner = env.runner
     image = env.image
-    image_root = root_path(runner.value) / image.value
+    image_root = root_path("pfrun") / "images" / image.value
     vars_file = image_root / "env.txt"
     if not vars_file.exists():
         return {}
@@ -104,6 +104,7 @@ class Env:
 
         if self.image == Image.BUILD:
             mounts.append((root_path('helpers'), False))
+            mounts.append((root_path("pfrun") / "images" / "build" / "build_scripts", False))
             mounts.append((self.project.path("py"), True))
             mounts.append((self.project.path("cpython"), True))
             mounts.append((self.project.path('tools'), True))
@@ -131,6 +132,7 @@ class Env:
             mounts.append((self.project.path('tools'), False))
             mounts.append((root_path('helpers'), False))
             mounts.append((self.project.path('inputs'), False))
+            mounts.append((self.project.path('outputs'), True))
             mounts.append((self.project.path('logs'), False))
             mounts.append((self.project.path('cores'), False))
             mounts.append((self.project.path('artifacts'), True))
@@ -139,6 +141,10 @@ class Env:
 
         if self.image == Image.BISECT:
             mounts.append((self.project.path('bisect_script'), False))
+
+        if self.image == Image.DIST:
+            mounts.append((self.project.path('dist_script'), False))
+            mounts.append((root_path('cache'), True))
 
         return mounts
     

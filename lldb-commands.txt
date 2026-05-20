@@ -1,7 +1,0 @@
-register read x0 x1 x9 pc lr sp fp
-p/x ((uintptr_t)$x0 & 0xf)
-p/x ((PyObject*)$x0)->ob_refcnt
-p/x ((PyObject*)$x0)->ob_type
-memory region $x0
-memory region ((PyObject*)$x0)->ob_type
-bt

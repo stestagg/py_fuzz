@@ -1,0 +1,49 @@
+diff --git a/include/forkserver.h b/include/forkserver.h
+index 80713ea3..99857ea3 100644
+--- a/include/forkserver.h
++++ b/include/forkserver.h
+@@ -110,6 +110,7 @@ typedef struct afl_forkserver {
+ 
+   s32 fsrv_pid,                         /* PID of the fork server           */
+       child_pid,                        /* PID of the fuzzed program        */
++      last_child_pid,                   /* PID of the most-recently-run child */
+       child_status,                     /* waitpid result for the child     */
+       out_dir_fd;                       /* FD of the lock file              */
+ 
+diff --git a/src/afl-forkserver.c b/src/afl-forkserver.c
+index ec71d03c..ce96f6eb 100644
+--- a/src/afl-forkserver.c
++++ b/src/afl-forkserver.c
+@@ -2349,7 +2349,12 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+ 
+   }
+ 
+-  if (!WIFSTOPPED(fsrv->child_status)) { fsrv->child_pid = -1; }
++  if (!WIFSTOPPED(fsrv->child_status)) {
++
++    fsrv->last_child_pid = fsrv->child_pid;
++    fsrv->child_pid = -1;
++
++  }
+ 
+   fsrv->total_execs++;
+ 
+diff --git a/src/afl-fuzz-bitmap.c b/src/afl-fuzz-bitmap.c
+index 818cad77..c461f5b9 100644
+--- a/src/afl-fuzz-bitmap.c
++++ b/src/afl-fuzz-bitmap.c
+@@ -1079,6 +1079,14 @@ may_save_fault:
+     ck_write(fd, mem, len, fn);
+     close(fd);
+ 
++    if (fault == FSRV_RUN_CRASH) {
++
++      fprintf(stderr, "target with pid %d crashed, writing crash file: %s\n",
++              afl->fsrv.last_child_pid,
++              strrchr((char *)fn, '/') ? strrchr((char *)fn, '/') + 1 : (char *)fn);
++
++    }
++
+   }
+ 
+   if (unlikely(afl->infoexec) && fault == FSRV_RUN_CRASH) {

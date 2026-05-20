@@ -1,0 +1,10 @@
+::sysinit:/usr/local/bin/mount -t proc proc /proc
+::sysinit:/usr/local/bin/mount -t sysfs sys /sys
+::sysinit:/usr/local/bin/mount -t devtmpfs dev /dev
+::sysinit:/usr/local/bin/mount -t tmpfs tmpfs /tmp -o nosuid,nodev
+::sysinit:/usr/local/bin/mkdir -p /pfm
+::sysinit:/usr/local/bin/mount -t virtiofs pfrun /pfm
+::sysinit:/usr/local/bin/sysctl -p /etc/sysctl.conf
+::wait:/usr/local/bin/pfm-run
+::ctrlaltdel:/usr/local/bin/poweroff
+::shutdown:/usr/local/bin/poweroff
