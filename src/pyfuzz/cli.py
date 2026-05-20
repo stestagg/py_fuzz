@@ -38,8 +38,8 @@ def create(ctx):
     click.echo(f"Project '{ctx.obj['project']}' created successfully.")
 
 
-async def run_in_env(env, cmd, interactive=False):
-    proc = await env.run(cmd, console=True, interactive=interactive)
+async def run_in_env(env, cmd, interactive=False, **kwargs):
+    proc = await env.run(cmd, console=True, interactive=interactive, **kwargs)
     await proc.wait()
     return proc
 
@@ -67,20 +67,20 @@ def run_cmd(ctx, cmd, pfrun, docker, image):
 @click.option("--docker", is_flag=True, help="Run using docker")
 @click.option("--image", type=click.Choice([e.value for e in Image]), help="Image to use")
 @click.option("-c", "--cmd", default=None, help="Command to run non-interactively instead of opening a shell")
+@click.option("--dmesg", default=None, metavar="PATH", help="Write boot/kernel log to this file (pfrun only)")
 @click.pass_context
-def shell(ctx, pfrun, docker, image, cmd):
+def shell(ctx, pfrun, docker, image, cmd, dmesg):
     if pfrun and docker:
         raise click.UsageError("Cannot specify both --pfrun and --docker")
 
     runner = Runner.PFRUN if pfrun else Runner.DOCKER if docker else None
-    click.echo(f"Running test command for project: {ctx.obj['project']}")
     project = Project.load(ctx.obj["project"])
     env = Env(project, image, runner)
+    kwargs = {"dmesg_path": dmesg} if dmesg else {}
     if cmd:
-        asyncio.run(run_in_env(env, ['/bin/sh', '-c', cmd], interactive=False))
+        asyncio.run(run_in_env(env, ['/bin/sh', '-c', cmd], interactive=False, **kwargs))
     else:
-        asyncio.run(run_in_env(env, ['/bin/sh'], interactive=True))
-    click.echo(f"Done")
+        asyncio.run(run_in_env(env, ['/bin/sh'], interactive=True, **kwargs))
 
 
 @cli.command("build")

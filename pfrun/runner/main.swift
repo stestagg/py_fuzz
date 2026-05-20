@@ -10,6 +10,7 @@ private struct CLIOptions {
     let envFile: String?
     let mounts: [MountShare]
     let interactive: Bool
+    let dmesgPath: String?
 
     var kernelURL: URL { imageDir.appendingPathComponent("vmlinux") }
     var initrdURL: URL { imageDir.appendingPathComponent("initram") }
@@ -98,6 +99,8 @@ private final class LinuxVirtRunner: @unchecked Sendable {
     private var vmDelegate: VMDelegate?
     private var hasExited = false
     private var exitCodeOnStop: Int32 = EXIT_SUCCESS
+    private var resizePipeWriter: FileHandle?
+    private var sigwinchSource: DispatchSourceSignal?
 
     init(options: CLIOptions) {
         self.options = options
@@ -181,9 +184,6 @@ private final class LinuxVirtRunner: @unchecked Sendable {
     }
 
     private func finishFromGuestStop() {
-        if exitCodeOnStop == EXIT_SUCCESS {
-            print("\nThe guest shut down. Exiting.")
-        }
         finish(code: exitCodeOnStop)
     }
 
@@ -197,12 +197,92 @@ private final class LinuxVirtRunner: @unchecked Sendable {
     }
 
     private func createSerialPortConfiguration() -> [VZSerialPortConfiguration] {
-        let consoleConfiguration = VZVirtioConsoleDeviceSerialPortConfiguration()
-        consoleConfiguration.attachment = VZFileHandleSerialPortAttachment(
-            fileHandleForReading: FileHandle.standardInput,
+        let hvc0 = VZVirtioConsoleDeviceSerialPortConfiguration()
+        let hvc1 = VZVirtioConsoleDeviceSerialPortConfiguration()
+        let nullRead = FileHandle(forReadingAtPath: "/dev/null")!
+
+        // hvc0 write side: boot/kernel console output.
+        let hvc0WriteHandle: FileHandle
+        if let dmesgPath = options.dmesgPath {
+            FileManager.default.createFile(atPath: dmesgPath, contents: nil)
+            if let dmesgHandle = FileHandle(forWritingAtPath: dmesgPath) {
+                hvc0WriteHandle = dmesgHandle
+            } else {
+                writeStderr("Warning: could not open dmesg path for writing: \(dmesgPath)\n")
+                hvc0WriteHandle = FileHandle(forWritingAtPath: "/dev/null")!
+            }
+        } else {
+            // Relay boot/kernel noise to stdout with dim/grey ANSI codes.
+            let greyPipe = Pipe()
+            hvc0WriteHandle = greyPipe.fileHandleForWriting
+            startGreyRelay(from: greyPipe.fileHandleForReading)
+        }
+
+        // hvc0 read side: in interactive mode use a resize pipe so that SIGWINCH events
+        // can be forwarded to the guest as "R:rows:cols\n" messages that pfm-run applies
+        // with stty. Non-interactive sessions don't need resize signalling.
+        let hvc0ReadHandle: FileHandle
+        if options.interactive {
+            let resizePipe = Pipe()
+            resizePipeWriter = resizePipe.fileHandleForWriting
+            hvc0ReadHandle = resizePipe.fileHandleForReading
+            setupSIGWINCH()
+        } else {
+            hvc0ReadHandle = nullRead
+        }
+
+        hvc0.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: hvc0ReadHandle,
+            fileHandleForWriting: hvc0WriteHandle
+        )
+
+        // hvc1: [PFM] messages + command output (non-interactive) or interactive shell I/O.
+        // In interactive mode, pfm-run opens /dev/hvc1 *inside* the setsid'd new session so
+        // the kernel automatically assigns it as the controlling terminal — no cttyhack needed.
+        hvc1.attachment = VZFileHandleSerialPortAttachment(
+            fileHandleForReading: options.interactive ? FileHandle.standardInput : nullRead,
             fileHandleForWriting: FileHandle.standardOutput
         )
-        return [consoleConfiguration]
+
+        return [hvc0, hvc1]
+    }
+
+    private func setupSIGWINCH() {
+        signal(SIGWINCH, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.sendResizeToGuest()
+        }
+        source.resume()
+        sigwinchSource = source
+    }
+
+    private func sendResizeToGuest() {
+        guard let writer = resizePipeWriter else { return }
+        var ws = winsize()
+        guard ioctl(FileHandle.standardOutput.fileDescriptor, TIOCGWINSZ, &ws) == 0,
+              ws.ws_row > 0, ws.ws_col > 0 else { return }
+        let msg = "R:\(ws.ws_row):\(ws.ws_col)\n"
+        if let data = msg.data(using: .utf8) {
+            writer.write(data)
+        }
+    }
+
+    private func startGreyRelay(from handle: FileHandle) {
+        let dim = "\u{1B}[2m".data(using: .utf8)!
+        let reset = "\u{1B}[0m".data(using: .utf8)!
+        let stdout = FileHandle.standardOutput
+        DispatchQueue.global(qos: .utility).async {
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                var out = Data()
+                out.append(dim)
+                out.append(chunk)
+                out.append(reset)
+                stdout.write(out)
+            }
+        }
     }
 
     private func createDiskConfiguration() throws -> VZStorageDeviceConfiguration {
@@ -242,6 +322,12 @@ private final class LinuxVirtRunner: @unchecked Sendable {
         }
         if options.interactive {
             cmdlineParts.append("pfminteractive=1")
+            var ws = winsize()
+            if ioctl(FileHandle.standardOutput.fileDescriptor, TIOCGWINSZ, &ws) == 0,
+               ws.ws_row > 0, ws.ws_col > 0 {
+                cmdlineParts.append("pfmrows=\(ws.ws_row)")
+                cmdlineParts.append("pfmcols=\(ws.ws_col)")
+            }
         }
         bootLoader.commandLine = cmdlineParts.joined(separator: " ")
 
@@ -259,6 +345,7 @@ private func parseOptions(arguments: [String]) throws -> CLIOptions {
     var mounts: [MountShare] = []
     var mountNames = Set<String>()
     var interactive = false
+    var dmesgPath: String?
 
     var index = 1
     while index < arguments.count {
@@ -329,6 +416,11 @@ private func parseOptions(arguments: [String]) throws -> CLIOptions {
                 throw CLIError.usage("Duplicate mount name: \(mount.name).")
             }
             mounts.append(mount)
+        case "--dmesg":
+            guard !value.isEmpty else {
+                throw CLIError.usage("--dmesg must not be empty.")
+            }
+            dmesgPath = value
         default:
             throw CLIError.usage("Unknown argument: \(key).")
         }
@@ -360,7 +452,8 @@ private func parseOptions(arguments: [String]) throws -> CLIOptions {
         command: command,
         envFile: envFile,
         mounts: mounts,
-        interactive: interactive
+        interactive: interactive,
+        dmesgPath: dmesgPath
     )
 
     try validateImages(options: options)
@@ -413,7 +506,7 @@ private func validateImages(options: CLIOptions) throws {
 
 private func usage() -> String {
     """
-    Usage: pfrun --imagedir PATH --ncpu N --mem N --cmd CMD [--timeout S] [--env-file PATH] [--mount RELPATH:NAME] [--mount-rw RELPATH:NAME]
+    Usage: pfrun --imagedir PATH --ncpu N --mem N --cmd CMD [--timeout S] [--env-file PATH] [--dmesg PATH] [--mount RELPATH:NAME] [--mount-rw RELPATH:NAME]
 
       --imagedir PATH  Directory containing fs.img, initram, and vmlinux.
       --ncpu N         Number of virtual CPUs.
@@ -423,6 +516,8 @@ private func usage() -> String {
       --env-file PATH  Path to an env file inside the VM (lines: export VAR=VAL). Optional.
       --interactive    Run interactively: adds pfminteractive=1 to kernel cmdline so
                        pfm-run sets up a controlling terminal via cttyhack.
+      --dmesg PATH     Write kernel/boot console output (hvc0) to this file instead of
+                       relaying it to stdout with dim ANSI codes.
       --mount P:N      Expose relative directory path P as read-only share N. Repeatable.
       --mount-rw P:N   Expose relative directory path P as read-write share N. Repeatable.
 

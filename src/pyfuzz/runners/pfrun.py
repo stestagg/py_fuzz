@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shlex
 import subprocess
 import odhash
@@ -17,6 +18,7 @@ async def pf_run(
     vm_timeout: int = None,
     console: bool = False,
     interactive: bool = False,
+    dmesg_path: str | None = None,
 ):
     assert env.runner == Runner.PFRUN
     
@@ -47,7 +49,9 @@ async def pf_run(
     ]
     if vm_timeout is not None:
         pf_cmd.extend([f'--timeout', str(vm_timeout)])
-    
+    if dmesg_path is not None:
+        pf_cmd.extend(['--dmesg', str(dmesg_path)])
+
     for mount_dir, is_writable in env.mounts:
         mount_name = mount_dir.name
         if is_writable:
@@ -61,8 +65,7 @@ async def pf_run(
 
     pipe_val = None if console else subprocess.PIPE 
 
-    pf_cmd_str = shlex.join(str(p) for p in pf_cmd)
-    print(f'Running command in pfrun: {pf_cmd_str}')
+    print(f'Running command in pfrun: {cmd_str}')
 
     proc = await asyncio.create_subprocess_exec(
         *pf_cmd,

@@ -76,6 +76,9 @@ EOF
     sudo mkdir -p /fs/pfm
     sudo mkdir -p /fs/usr/local/bin
 
+    clang -O2 -Wall -Wextra -o /build/pfm-pty /build/pfm-pty.c
+    sudo cp /build/pfm-pty /fs/usr/local/bin/pfm-pty
+
     # Install busybox applets into /usr/local/bin so they don't conflict with
     # packages (coreutils, findutils, etc.) that downstream layers add via pacstrap
     sudo mkdir -p /fs/usr/local/bin
@@ -95,7 +98,6 @@ EOF
         'kernel.core_uses_pid = 0' \
         'vm.overcommit_memory = 0' \
         'kernel.randomize_va_space = 0' \
-        'kernel.sched_child_runs_first = 1' \
         'kernel.sched_autogroup_enabled = 1' \
         | sudo tee -a /fs/etc/sysctl.conf >/dev/null
 

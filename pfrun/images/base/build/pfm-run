@@ -2,6 +2,12 @@
 
 set -u
 
+BLUE='\033[34m'
+GREEN='\033[32m'
+RED='\033[31m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
 cmdline="$(cat /proc/cmdline)"
 
 case " $cmdline " in
@@ -17,31 +23,58 @@ case " $cmdline " in
                     if [ -f "$env_file" ]; then
                         . "$env_file"
                     else
-                        echo "[PFM] env file not found: $env_file" > /dev/hvc0
+                        printf '[PFM] env file not found: %s\n' "$env_file" > /dev/hvc1
                     fi
                     ;;
             esac
 
             case " $cmdline " in
                 *" pfminteractive=1 "*)
-                    echo "[PFM] starting interactive command: $script_cmd" > /dev/hvc0
+                    # Apply initial terminal size so programs like tmux get a valid geometry.
+                    pfm_rows=$(printf '%s\n' "$cmdline" | sed -n 's/.*pfmrows=\([^ ]*\).*/\1/p')
+                    pfm_cols=$(printf '%s\n' "$cmdline" | sed -n 's/.*pfmcols=\([^ ]*\).*/\1/p')
+                    if [ -n "$pfm_rows" ] && [ -n "$pfm_cols" ]; then
+                        stty rows "$pfm_rows" cols "$pfm_cols" < /dev/hvc1 2>/dev/null || true
+                    fi
+
+                    # Forward terminal resize events: the host writes "R:rows:cols\n" to
+                    # hvc0's read side on SIGWINCH; pick them up and apply with stty.
+                    while IFS= read -r pfm_resize_line < /dev/hvc0; do
+                        case "$pfm_resize_line" in
+                            R:*:*)
+                                pfm_r=$(printf '%s' "$pfm_resize_line" | cut -d: -f2)
+                                pfm_c=$(printf '%s' "$pfm_resize_line" | cut -d: -f3)
+                                stty rows "$pfm_r" cols "$pfm_c" < /dev/hvc1 2>/dev/null || true
+                                ;;
+                        esac
+                    done &
+                    pfm_resize_pid=$!
+
+                    printf "${BLUE}${BOLD}[PFM] Running %s${RESET}\n" "$script_cmd" > /dev/hvc1
                     mkdir -p /dev/pts
                     mount -t devpts devpts /dev/pts 2>/dev/null || true
-                    # setsid creates a new session; cttyhack then claims hvc0 as the
-                    # controlling terminal (TIOCSCTTY) and execs the command.  Without
-                    # this, Ctrl-C doesn't reach child processes and terminal state
-                    # changes by programs like vi bleed into the parent shell on exit.
-                    setsid cttyhack sh -lc "$script_cmd" < /dev/hvc0 > /dev/hvc0 2>&1
+                    # Open /dev/hvc1 *inside* the new session created by setsid, so the
+                    # kernel automatically assigns it as the controlling terminal without
+                    # needing an explicit TIOCSCTTY ioctl (cttyhack).
+                    # setsid sh -c 'exec "$0" < /dev/hvc1 > /dev/hvc1 2>&1' "$script_cmd"
+                    # setsid cttyhack sh -lc "$script_cmd" < /dev/hvc1 > /dev/hvc1 2>&1
+                    setsid /usr/local/bin/pfm-pty /dev/hvc1 -- sh -c "$script_cmd"
+
+                    kill "$pfm_resize_pid" 2>/dev/null || true
                     ;;
                 *)
-                    echo "[PFM] running command: $script_cmd" > /dev/hvc0
-                    sh -c "$script_cmd" > /dev/hvc0 2>&1
+                    printf "${BLUE}${BOLD}[PFM] Running %s${RESET}\n" "$script_cmd" > /dev/hvc1
+                    sh -c "$script_cmd" > /dev/hvc1 2>&1
                     ;;
             esac
             cmd_status=$?
-            echo "[PFM] command ended with status: $cmd_status" > /dev/hvc0
+            if [ "$cmd_status" -eq 0 ]; then
+                STATUS_COLOR="$GREEN"
+            else
+                STATUS_COLOR="$RED"
+            fi
+            printf "${STATUS_COLOR}${BOLD}[PFM] command exited with status: %s${RESET}\n" "$cmd_status" > /dev/hvc1
 
-            echo "[PFM] powering off after command" > /dev/hvc0
             if command -v poweroff >/dev/null 2>&1; then
                 poweroff -f > /dev/hvc0 2>&1 || poweroff > /dev/hvc0 2>&1
             elif command -v halt >/dev/null 2>&1; then
@@ -49,7 +82,7 @@ case " $cmdline " in
             fi
             exit "$cmd_status"
         else
-            echo "[PFM] invalid pfmscript payload" > /dev/hvc0
+            printf '[PFM] invalid pfmscript payload\n' > /dev/hvc1
         fi
         ;;
 esac
