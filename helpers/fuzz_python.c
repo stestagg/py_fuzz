@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -229,7 +230,7 @@ int main(int argc, char **argv) {
         // "struct, binascii, fcntl, math, "
         // "pyexpat, select, termios, unicodedata, zlib"
         // "from xml.parsers import expat"
-        "import binascii, unicodedata"
+        "import binascii, unicodedata, faulthandler"
     );
     PyErr_Clear();
 
@@ -313,17 +314,18 @@ int main(int argc, char **argv) {
     __AFL_INIT();
 #endif
 
-    char track_dir[4096] = {0};
+    FILE *track_fp = NULL;
     if (do_track_inputs) {
-        pid_t  pid = getpid();
-        time_t ts  = time(NULL);
-        snprintf(track_dir, sizeof(track_dir),
-                 "%s/%d.%ld", track_inputs_base, (int)pid, (long)ts);
-        printf("FUZZ_TRACK_INPUTS: Tracking fuzz inputs in: %s\n", track_dir);
-        if (mkdir(track_dir, 0755) != 0) {
-            printf("FUZZ_TRACK_INPUTS is set but failed to create directory: %s\n", track_dir);
+        char track_path[4096];
+        pid_t pid = getpid();
+        snprintf(track_path, sizeof(track_path),
+                 "%s/%d.inputs", track_inputs_base, (int)pid);
+        track_fp = fopen(track_path, "wb");
+        if (!track_fp) {
+            printf("FUZZ_TRACK_INPUTS: failed to open: %s\n", track_path);
             abort();
         }
+        printf("FUZZ_TRACK_INPUTS: Tracking fuzz inputs in: %s\n", track_path);
     }
 
     unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
@@ -343,22 +345,24 @@ int main(int argc, char **argv) {
             abort();
         }
 
-        if (do_track_inputs) {
-            char fpath[sizeof(track_dir) + 32];
-            snprintf(fpath, sizeof(fpath), "%s/%lu", track_dir, iter);
-            FILE *tf = fopen(fpath, "wb");
-            if (tf) {
-                fwrite(buf, 1, (size_t)len, tf);
-                fclose(tf);
-            }
+        if (track_fp) {
+            uint32_t input_len = (uint32_t)len;
+            static const char null_pad[6] = {0};
+            fwrite(&input_len, sizeof(uint32_t), 1, track_fp);
+            fwrite("\n", 1, 1, track_fp);
+            fwrite(buf, 1, (size_t)len, track_fp);
+            fwrite("\n", 1, 1, track_fp);
+            fwrite(null_pad, 1, 6, track_fp);
+            fwrite("\n", 1, 1, track_fp);
+            fflush(track_fp);
         }
 
-        /*
-         * Py_CompileString takes a NUL-terminated C string.
-         * Embedded NULs in the testcase therefore truncate the effective input.
-         * That's acceptable for this harness, but worth remembering when
-         * interpreting coverage or reproducing crashes.
-         */
+        /* Py_CompileString is NUL-terminated; inputs with embedded NULs would
+         * be silently truncated, hurting reproducibility. Skip them instead. */
+        if (memchr(buf, '\0', (size_t)len) != NULL) {
+            continue;
+        }
+
         char *src = (char *)malloc((size_t)len + 1);
         if (!src) {
             PyErr_Clear();
@@ -408,6 +412,10 @@ int main(int argc, char **argv) {
         PyErr_Clear();
 
         free(src);
+    }
+
+    if (track_fp) {
+        fclose(track_fp);
     }
 
     return 0;

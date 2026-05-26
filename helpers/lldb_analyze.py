@@ -4,11 +4,11 @@
 import argparse
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
-LAUNCH_TIMEOUT_S = 30
-POLL_TIMEOUT_S = 1
+RUN_TIMEOUT_S = 60
 MEM_LIMIT_EXEC_PATH = "/pfm/tools/mem_limit_exec"
 
 
@@ -58,13 +58,22 @@ def _is_exec_stop(process, lldb) -> bool:
     return False
 
 
-def analyze_crash(lldb, debugger, target, input_path: str, envp=None, commands=None) -> str:
+def _launch_and_wait_for_crash(lldb, debugger, target, input_path: str = None, argv=None, envp=None):
+    """Launch the target and return the process once it crashes or exits.
+
+    Handles the exec stop transparently (same as analyze_crash). Returns
+    (process, error_str) where error_str is non-None on failure/timeout.
+    Pass input_path to feed a file as stdin (crash-input mode).
+    Pass argv to launch with command-line arguments and /dev/null stdin (script mode).
+    """
+    stdin_path = input_path if input_path else "/dev/null"
     error = lldb.SBError()
+    print("Launching process")
     process = target.Launch(
-        debugger.GetListener(),  # listener
-        None,            # argv
+        debugger.GetListener(),
+        argv,            # argv
         envp,            # envp
-        input_path,      # stdin_path
+        stdin_path,      # stdin_path
         "/dev/stdout",   # stdout_path
         "/dev/stderr",   # stderr_path
         None,            # working_directory
@@ -74,53 +83,140 @@ def analyze_crash(lldb, debugger, target, input_path: str, envp=None, commands=N
     )
 
     if error.Fail():
-        return f"error: launch failed: {error}\n"
+        return None, f"error: launch failed: {error}\n"
 
-    running_states = {lldb.eStateAttaching, lldb.eStateLaunching, lldb.eStateRunning}
     listener = debugger.GetListener()
-    elapsed = 0
     event = lldb.SBEvent()
+    deadline = time.monotonic() + RUN_TIMEOUT_S
+
     while True:
-        state = process.GetState()
-        if state in running_states:
-            listener.WaitForEvent(POLL_TIMEOUT_S, event)
-            elapsed += POLL_TIMEOUT_S
-            if elapsed >= LAUNCH_TIMEOUT_S:
-                process.Kill()
-                return "error: process timed out\n"
-        elif state == lldb.eStateStopped and _is_exec_stop(process, lldb):
-            process.Continue()
-        else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.Kill()
+            return process, "error: process timed out\n"
+
+        got_event = listener.WaitForEvent(max(1, int(remaining)), event)
+
+        if not got_event:
+            continue
+
+        if not lldb.SBProcess.EventIsProcessEvent(event):
+            continue
+
+        state = lldb.SBProcess.GetStateFromEvent(event)
+
+        if state == lldb.eStateStopped:
+            if _is_exec_stop(process, lldb):
+                print("Process stopped at exec, continuing")
+                process.Continue()
+            else:
+                break
+        elif state in (lldb.eStateExited, lldb.eStateCrashed, lldb.eStateDetached):
             break
+
+    return process, None
+
+
+def analyze_crash(lldb, debugger, target, input_path: str, envp=None, commands=None) -> str:
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp)
+    if err:
+        return err
 
     state = process.GetState()
     if state == lldb.eStateExited:
         code = process.GetExitStatus()
         return f"process exited cleanly with code {code} — no crash detected\n"
 
+    print("Collecting diagnostics")
     return collect_diagnostics(debugger, commands)
+
+
+def interactive_crash(lldb, debugger, target, input_path: str, envp=None) -> None:
+    """Launch the target, wait for the crash, then start an interactive session."""
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp)
+    if err:
+        print(err, file=sys.stderr)
+        return
+
+    state = process.GetState()
+    if state == lldb.eStateExited:
+        code = process.GetExitStatus()
+        print(f"process exited cleanly with code {code} — no crash detected")
+        return
+
+    print("Process stopped. Entering interactive LLDB session (type 'q' to quit).")
+    _run_interactive_session(lldb, debugger)
+
+
+def analyze_script(lldb, debugger, target, script_path: str, envp=None, commands=None) -> str:
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, argv=[script_path], envp=envp)
+    if err:
+        return err
+
+    state = process.GetState()
+    if state == lldb.eStateExited:
+        code = process.GetExitStatus()
+        return f"process exited cleanly with code {code} — no crash detected\n"
+
+    print("Collecting diagnostics")
+    return collect_diagnostics(debugger, commands)
+
+
+def interactive_script(lldb, debugger, target, script_path: str, envp=None) -> None:
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, argv=[script_path], envp=envp)
+    if err:
+        print(err, file=sys.stderr)
+        return
+
+    state = process.GetState()
+    if state == lldb.eStateExited:
+        code = process.GetExitStatus()
+        print(f"process exited cleanly with code {code} — no crash detected")
+        return
+
+    print("Process stopped. Entering interactive LLDB session (type 'q' to quit).")
+    _run_interactive_session(lldb, debugger)
+
+
+def interactive_core(lldb, debugger, target, core_path: str) -> None:
+    """Load the core file then start an interactive session."""
+    process = target.LoadCore(core_path)
+    if not process or not process.IsValid():
+        print(f"error: could not load core {core_path}", file=sys.stderr)
+        return
+
+    print("Core loaded. Entering interactive LLDB session (type 'q' to quit).")
+    _run_interactive_session(lldb, debugger)
+
+
+def _run_interactive_session(lldb, debugger) -> None:
+    debugger.SetAsync(False)
+    options = lldb.SBCommandInterpreterRunOptions()
+    debugger.RunCommandInterpreter(True, False, options, 0, False, False)
 
 
 def run(args) -> str:
     lldb = import_lldb()
-
+    print("Creating lldb session")
     debugger = lldb.SBDebugger.Create()
-    debugger.SetAsync(False)
+    debugger.SetAsync(True)
 
     commands = None
     if args.commands_file:
         commands = [l for l in Path(args.commands_file).read_text().splitlines() if l.strip()]
 
-    if args.crash_input and args.mem_limit_mb > 0:
+    if (args.crash_input or args.script_path) and args.mem_limit_mb > 0:
+        print("Have mem limit, using mem_limit_exec")
         launch_binary = MEM_LIMIT_EXEC_PATH
         crash_envp = [
-            f"MEM_LIMIT_KB={args.mem_limit_mb * 1024}",
+            f"MEM_LIMIT_MB={args.mem_limit_mb}",
             f"MEM_LIMIT_EXEC={args.target}",
         ]
     else:
         launch_binary = args.target
         crash_envp = None
 
+    print("Creating target")
     target = debugger.CreateTarget(launch_binary)
     if not target or not target.IsValid():
         return f"error: could not create target {launch_binary}\n"
@@ -128,6 +224,8 @@ def run(args) -> str:
     try:
         if args.core:
             return analyze_core(lldb, debugger, target, args.core, commands)
+        elif args.script_path:
+            return analyze_script(lldb, debugger, target, args.script_path, envp=crash_envp, commands=commands)
         else:
             return analyze_crash(lldb, debugger, target, args.crash_input, envp=crash_envp, commands=commands)
     finally:
@@ -139,14 +237,53 @@ def main() -> None:
     parser.add_argument("--target", required=True)
     parser.add_argument("--core")
     parser.add_argument("--crash-input")
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--script-path")
+    parser.add_argument("--output")
     parser.add_argument("--mem-limit-mb", type=int, default=0)
     parser.add_argument("--commands-file")
+    parser.add_argument("--interactive", action="store_true",
+                        help="Wait for crash then drop into an interactive LLDB session")
     args = parser.parse_args()
 
-    if not args.core and not args.crash_input:
-        print("error: one of --core or --crash-input is required", file=sys.stderr)
+    if not args.core and not args.crash_input and not args.script_path:
+        print("error: one of --core, --crash-input, or --script-path is required", file=sys.stderr)
         sys.exit(1)
+
+    if not args.interactive and not args.output:
+        print("error: --output is required in non-interactive mode", file=sys.stderr)
+        sys.exit(1)
+
+    if args.interactive:
+        lldb = import_lldb()
+        debugger = lldb.SBDebugger.Create()
+        debugger.SetAsync(True)
+
+        if (args.crash_input or args.script_path) and args.mem_limit_mb > 0:
+            launch_binary = MEM_LIMIT_EXEC_PATH
+            crash_envp = [
+                f"MEM_LIMIT_MB={args.mem_limit_mb}",
+                f"MEM_LIMIT_EXEC={args.target}",
+            ]
+        else:
+            launch_binary = args.target
+            crash_envp = None
+
+        print(f"Creating target {launch_binary}")
+        target = debugger.CreateTarget(launch_binary)
+        if not target or not target.IsValid():
+            print(f"error: could not create target {launch_binary}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            if args.core:
+                interactive_core(lldb, debugger, target, args.core)
+            elif args.script_path:
+                interactive_script(lldb, debugger, target, args.script_path, envp=crash_envp)
+            else:
+                interactive_crash(lldb, debugger, target, args.crash_input, envp=crash_envp)
+        finally:
+            lldb.SBDebugger.Destroy(debugger)
+        return
 
     output = ""
     failed = False

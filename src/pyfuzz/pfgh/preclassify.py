@@ -1,12 +1,11 @@
-import openai
 import asyncio
 from tqdm.auto import tqdm
 from pydantic import BaseModel
-from pathlib import Path
 
 from .pr import load_pr, pr_add_value
+from ..llm import create_openai_client
 
-client = openai.AsyncClient(api_key=Path("~/.openai_key").expanduser().read_text().strip())
+client = create_openai_client()
 
 class PreclassificationResponse(BaseModel):
     risk_score: int

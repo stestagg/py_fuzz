@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronRight, Circle, Copy, RefreshCw } from "lucide-react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ArrowRight, Check, ChevronRight, Circle, Copy, Plus, RefreshCw, X } from "lucide-react";
 
 type UiConfig = {
   wsUrl?: string;
@@ -30,6 +30,12 @@ type ArtifactPayload = {
   path: string;
   hasInput: boolean;
   inputSize: number | null;
+  groupValues: ArtifactGroupValue[];
+};
+
+type ArtifactGroupValue = {
+  value: string;
+  label: string;
 };
 
 type ArtifactFile = {
@@ -91,6 +97,8 @@ const summaryOrder = [
   "edges_found",
 ];
 
+const DEFAULT_GROUP_SPECS = ["type"];
+
 function wsUrl() {
   const configured = window.PYFUZZ_UI_CONFIG?.wsUrl ?? import.meta.env.VITE_PYFUZZ_WS_URL;
   if (configured) {
@@ -120,6 +128,34 @@ function labelFromKey(key: string) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function isSafeGroupFilename(filename: string) {
+  return filename !== "" && filename !== "." && filename !== ".." && !filename.includes("/") && !filename.includes("\\");
+}
+
+function validateArtifactGroupSpec(raw: string) {
+  const spec = raw.trim();
+  if (!spec) {
+    return "Grouping spec cannot be empty";
+  }
+  if (spec === "type") {
+    return null;
+  }
+  const separator = spec.indexOf(":");
+  if (separator === -1) {
+    return "Use type, file:<name>, meta:<key>, or exists:<filename>";
+  }
+
+  const key = spec.slice(0, separator);
+  const value = spec.slice(separator + 1);
+  if (key === "meta") {
+    return value ? null : "meta: requires a key";
+  }
+  if (key === "file" || key === "exists") {
+    return isSafeGroupFilename(value) ? null : `${key}: filename must be local to the artifact directory`;
+  }
+  return "Use type, file:<name>, meta:<key>, or exists:<filename>";
+}
+
 function applyDashboardData(data: ReadyPayload, setters: {
   setProjects: (projects: string[]) => void;
   setSelectedProject: (project: ProjectSnapshot | null) => void;
@@ -145,6 +181,7 @@ function App() {
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [artifacts, setArtifacts] = useState<ArtifactPayload[]>([]);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [groupSpecs, setGroupSpecs] = useState<string[]>(DEFAULT_GROUP_SPECS);
   const [selectedArtifactHash, setSelectedArtifactHash] = useState<string | null>(null);
   const [artifactDetail, setArtifactDetail] = useState<ArtifactDetail | null>(null);
   const [artifactDetailLoading, setArtifactDetailLoading] = useState(false);
@@ -248,10 +285,10 @@ function App() {
   const loadArtifacts = useCallback(async () => {
     setArtifactsLoading(true);
     try {
-      let result = await sendRequest("artifacts:list") as ArtifactsListResult;
+      let result = await sendRequest("artifacts:list", { groupSpecs }) as ArtifactsListResult;
       if (result.artifacts.length === 0) {
         await sendRequest("artifacts:sync");
-        result = await sendRequest("artifacts:list") as ArtifactsListResult;
+        result = await sendRequest("artifacts:list", { groupSpecs }) as ArtifactsListResult;
       }
       setArtifacts(result.artifacts);
     } catch {
@@ -259,20 +296,20 @@ function App() {
     } finally {
       setArtifactsLoading(false);
     }
-  }, [sendRequest]);
+  }, [groupSpecs, sendRequest]);
 
   const refreshArtifacts = useCallback(async () => {
     setArtifactsLoading(true);
     try {
       await sendRequest("artifacts:sync");
-      const result = await sendRequest("artifacts:list") as ArtifactsListResult;
+      const result = await sendRequest("artifacts:list", { groupSpecs }) as ArtifactsListResult;
       setArtifacts(result.artifacts);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setArtifactsLoading(false);
     }
-  }, [sendRequest]);
+  }, [groupSpecs, sendRequest]);
 
   const runLldb = useCallback(async (hash: string) => {
     setLldbRunning(true);
@@ -387,8 +424,10 @@ function App() {
               <RefreshCw size={16} aria-hidden />
             </button>
           </div>
+          <GroupingEditor groupSpecs={groupSpecs} onChange={setGroupSpecs} />
           <ArtifactTree
             artifacts={artifacts}
+            groupSpecs={groupSpecs}
             loading={artifactsLoading}
             selectedHash={selectedArtifactHash}
             onSelect={(hash) => void selectArtifact(hash)}
@@ -475,18 +514,264 @@ function SummaryView({ summary }: { summary: SummaryPayload | null }) {
   );
 }
 
+function GroupingEditor({ groupSpecs, onChange }: {
+  groupSpecs: string[];
+  onChange: (groupSpecs: string[]) => void;
+}) {
+  const [newSpec, setNewSpec] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingDraft, setEditingDraft] = useState("");
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const commitNewSpec = useCallback(() => {
+    const spec = newSpec.trim();
+    if (!spec) {
+      return;
+    }
+    const error = validateArtifactGroupSpec(spec);
+    if (error) {
+      setValidationError(error);
+      return;
+    }
+    onChange([...groupSpecs, spec]);
+    setNewSpec("");
+    setValidationError(null);
+  }, [groupSpecs, newSpec, onChange]);
+
+  const commitEditing = useCallback(() => {
+    if (editingIndex === null) {
+      return;
+    }
+    const spec = editingDraft.trim();
+    const error = validateArtifactGroupSpec(spec);
+    if (error) {
+      setValidationError(error);
+      return;
+    }
+    onChange(groupSpecs.map((item, index) => index === editingIndex ? spec : item));
+    setEditingIndex(null);
+    setEditingDraft("");
+    setValidationError(null);
+  }, [editingDraft, editingIndex, groupSpecs, onChange]);
+
+  const startEditing = useCallback((index: number) => {
+    setEditingIndex(index);
+    setEditingDraft(groupSpecs[index]);
+    setValidationError(null);
+  }, [groupSpecs]);
+
+  const removeSpec = useCallback((index: number) => {
+    onChange(groupSpecs.filter((_, itemIndex) => itemIndex !== index));
+    setValidationError(null);
+    if (editingIndex === index) {
+      setEditingIndex(null);
+      setEditingDraft("");
+    }
+  }, [editingIndex, groupSpecs, onChange]);
+
+  const moveSpec = useCallback((index: number, direction: -1 | 1) => {
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= groupSpecs.length) {
+      return;
+    }
+    const next = [...groupSpecs];
+    [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+    onChange(next);
+    setValidationError(null);
+  }, [groupSpecs, onChange]);
+
+  const handleNewSpecKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitNewSpec();
+    }
+  }, [commitNewSpec]);
+
+  const handleEditKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitEditing();
+    } else if (event.key === "Escape") {
+      setEditingIndex(null);
+      setEditingDraft("");
+      setValidationError(null);
+    }
+  }, [commitEditing]);
+
+  return (
+    <div className="artifact-grouping-wrap">
+      <div className="artifact-grouping-editor" aria-label="Artifact grouping levels">
+        {groupSpecs.map((spec, index) => (
+          <div className="grouping-chip" key={`${spec}-${index}`}>
+            <button
+              className="grouping-chip-step"
+              type="button"
+              onClick={() => moveSpec(index, -1)}
+              disabled={index === 0}
+              title="Move grouping level left"
+              aria-label="Move grouping level left"
+            >
+              <ArrowLeft size={12} aria-hidden />
+            </button>
+            {editingIndex === index ? (
+              <input
+                className="grouping-chip-input"
+                value={editingDraft}
+                autoFocus
+                onBlur={commitEditing}
+                onChange={(event) => setEditingDraft(event.target.value)}
+                onKeyDown={handleEditKeyDown}
+              />
+            ) : (
+              <button
+                className="grouping-chip-label"
+                type="button"
+                onClick={() => startEditing(index)}
+                title="Edit grouping level"
+              >
+                [{spec}]
+              </button>
+            )}
+            <button
+              className="grouping-chip-step"
+              type="button"
+              onClick={() => moveSpec(index, 1)}
+              disabled={index === groupSpecs.length - 1}
+              title="Move grouping level right"
+              aria-label="Move grouping level right"
+            >
+              <ArrowRight size={12} aria-hidden />
+            </button>
+            <button
+              className="grouping-chip-remove"
+              type="button"
+              onClick={() => removeSpec(index)}
+              title="Remove grouping level"
+              aria-label="Remove grouping level"
+            >
+              <X size={12} aria-hidden />
+            </button>
+          </div>
+        ))}
+        <div className="grouping-add">
+          <input
+            className="grouping-add-input"
+            value={newSpec}
+            placeholder="meta:worker"
+            onChange={(event) => setNewSpec(event.target.value)}
+            onKeyDown={handleNewSpecKeyDown}
+          />
+          <button
+            className="grouping-add-button"
+            type="button"
+            onClick={commitNewSpec}
+            title="Add grouping level"
+            aria-label="Add grouping level"
+          >
+            <Plus size={13} aria-hidden />
+          </button>
+        </div>
+      </div>
+      {validationError && <div className="grouping-error">{validationError}</div>}
+    </div>
+  );
+}
+
+type ArtifactGroupNode = {
+  key: string;
+  label: string;
+  count: number;
+  children: ArtifactGroupNode[];
+  artifacts: ArtifactPayload[];
+};
+
+type ArtifactGroupBuilder = {
+  path: string[];
+  label: string;
+  count: number;
+  children: Map<string, ArtifactGroupBuilder>;
+  artifacts: ArtifactPayload[];
+};
+
+function missingGroupValue(spec: string): ArtifactGroupValue {
+  return { value: `missing ${spec}`, label: `missing ${spec}` };
+}
+
+function makeBuilderNode(path: string[], label: string): ArtifactGroupBuilder {
+  return { path, label, count: 0, children: new Map(), artifacts: [] };
+}
+
+function finalizeGroupNode(node: ArtifactGroupBuilder): ArtifactGroupNode {
+  const children = [...node.children.values()]
+    .map(finalizeGroupNode)
+    .sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+  return {
+    key: JSON.stringify(node.path),
+    label: node.label,
+    count: node.count,
+    children,
+    artifacts: node.artifacts,
+  };
+}
+
+function buildArtifactTree(artifacts: ArtifactPayload[], groupSpecs: string[]) {
+  if (groupSpecs.length === 0) {
+    return [{
+      key: "ungrouped",
+      label: "Ungrouped",
+      count: artifacts.length,
+      children: [],
+      artifacts,
+    }];
+  }
+
+  const root = makeBuilderNode([], "root");
+  for (const artifact of artifacts) {
+    let parent = root;
+    for (let index = 0; index < groupSpecs.length; index++) {
+      const groupValue = artifact.groupValues[index] ?? missingGroupValue(groupSpecs[index]);
+      let child = parent.children.get(groupValue.value);
+      if (!child) {
+        child = makeBuilderNode([...parent.path, groupValue.value], groupValue.label);
+        parent.children.set(groupValue.value, child);
+      }
+      child.count += 1;
+      parent = child;
+    }
+    parent.artifacts.push(artifact);
+  }
+  return [...root.children.values()]
+    .map(finalizeGroupNode)
+    .sort((a, b) => a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+}
+
 function ArtifactTree({
   artifacts,
+  groupSpecs,
   loading,
   selectedHash,
   onSelect,
 }: {
   artifacts: ArtifactPayload[];
+  groupSpecs: string[];
   loading: boolean;
   selectedHash: string | null;
   onSelect: (hash: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const tree = useMemo(() => buildArtifactTree(artifacts, groupSpecs), [artifacts, groupSpecs]);
+
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups((previous) => {
+      const next = new Set(previous);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
 
   if (loading && artifacts.length === 0) {
     return <div className="tree-empty">Loading…</div>;
@@ -498,33 +783,82 @@ function ArtifactTree({
 
   return (
     <div className="artifact-tree">
+      {tree.map((node) => (
+        <ArtifactGroupNodeView
+          key={node.key}
+          node={node}
+          collapsedGroups={collapsedGroups}
+          onToggle={toggleGroup}
+          selectedHash={selectedHash}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ArtifactGroupNodeView({ node, collapsedGroups, onToggle, selectedHash, onSelect }: {
+  node: ArtifactGroupNode;
+  collapsedGroups: Set<string>;
+  onToggle: (key: string) => void;
+  selectedHash: string | null;
+  onSelect: (hash: string) => void;
+}) {
+  const expanded = !collapsedGroups.has(node.key);
+  return (
+    <div className="tree-group-node">
       <button
         className="tree-group-header"
         type="button"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => onToggle(node.key)}
         aria-expanded={expanded}
       >
         <ChevronRight size={13} className={expanded ? "tree-chevron expanded" : "tree-chevron"} aria-hidden />
-        <span>Ungrouped</span>
-        <span className="tree-count">{artifacts.length}</span>
+        <span className="tree-group-label" title={node.label}>{node.label}</span>
+        <span className="tree-count">{node.count}</span>
       </button>
       {expanded && (
         <ul className="tree-children" role="list">
-          {artifacts.map((artifact) => (
+          {node.children.map((child) => (
+            <li key={child.key}>
+              <ArtifactGroupNodeView
+                node={child}
+                collapsedGroups={collapsedGroups}
+                onToggle={onToggle}
+                selectedHash={selectedHash}
+                onSelect={onSelect}
+              />
+            </li>
+          ))}
+          {node.artifacts.map((artifact) => (
             <li key={artifact.hash}>
-              <button
-                type="button"
-                className={`tree-leaf-button${artifact.hash === selectedHash ? " tree-leaf-selected" : ""}`}
-                onClick={() => onSelect(artifact.hash)}
-              >
-                <span className={`tree-type-badge tree-type-${artifact.type}`}>{artifact.type[0].toUpperCase()}</span>
-                <span className="tree-hash">{artifact.hash}</span>
-              </button>
+              <ArtifactLeaf
+                artifact={artifact}
+                selected={artifact.hash === selectedHash}
+                onSelect={onSelect}
+              />
             </li>
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+function ArtifactLeaf({ artifact, selected, onSelect }: {
+  artifact: ArtifactPayload;
+  selected: boolean;
+  onSelect: (hash: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`tree-leaf-button${selected ? " tree-leaf-selected" : ""}`}
+      onClick={() => onSelect(artifact.hash)}
+    >
+      <span className={`tree-type-badge tree-type-${artifact.type}`}>{artifact.type[0].toUpperCase()}</span>
+      <span className="tree-hash">{artifact.hash}</span>
+    </button>
   );
 }
 

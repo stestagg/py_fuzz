@@ -1,23 +1,28 @@
-FROM ogarcia/archlinux:devel
+FROM ubuntu
 
-RUN pacman -Sy --noconfirm \
-        ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        ccache \
         git \
-        bzip2 \
-        libffi \
-        gdbm \
-        xz \
-        ncurses \
-        readline \
-        sqlite \
-        openssl \
-        libxml2 \
-        libxslt \
-        zstd \
+        libbz2-dev \
+        libffi-dev \
+        libgdbm-dev \
+        liblzma-dev \
+        libncurses-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libzstd-dev \
+        llvm \
         make \
-        python \
-        tk \
-        zlib
+        python3 \
+        python3-pip \
+        tk-dev \
+        zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /src
 WORKDIR /src
@@ -25,5 +30,6 @@ WORKDIR /src
 RUN git clone https://github.com/python/cpython /src/cpython
 
 COPY run_dist.py /src/run_dist.py
+RUN pip3 install --break-system-packages questionary rich
 
-ENTRYPOINT ["python", "/src/run_dist.py"]
+ENTRYPOINT ["python3", "/src/run_dist.py"]

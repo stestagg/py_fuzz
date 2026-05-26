@@ -39,7 +39,7 @@ async def run_dist(
     configure_args: str = "",
 ) -> int:
     script_name = script_path.name
-    dist_script_dir = project.path("dist_script")
+    dist_script_dir = project.path("scratch", "dist")
     dist_script_dir.mkdir(parents=True, exist_ok=True)
     dest = dist_script_dir / script_name
     if script_path.resolve() != dest.resolve():

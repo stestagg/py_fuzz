@@ -26,11 +26,13 @@ def clean_component(project: Project, component: CleanComponent):
         clean_dir(project_path(project, "outputs"))
         clean_dir(project_path(project, "cores"))
         clean_dir(project_path(project, "logs"))
+        clean_dir(project_path(project, "input_tracks"))
         clean_component(project, CleanComponent.ANALYSIS)
     elif component == CleanComponent.BUILD:
         clean_dir(project_path(project, "cpython"))
         clean_dir(project_path(project, "py"))
         clean_dir(project_path(project, "tools"))
+        clean_dir(project_path(project, "envs"))
     elif component == CleanComponent.ANALYSIS:
         clean_dir(project_path(project, "artifacts"))
     elif component == CleanComponent.ALL:

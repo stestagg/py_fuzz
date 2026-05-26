@@ -68,6 +68,8 @@ EOF
     git clone --branch dev --depth 1 https://github.com/AFLplusplus/AFLplusplus.git
     (
         cd AFLplusplus
+        git log -n1
+        git apply /build/fut_debug.diff
         make PERFORMANCE=1 NO_PYTHON=1 NO_QEMU=1 AFL_NO_X86=1 NO_FRIDA=1 NO_UNICORN=1 \
             CC=clang CXX=clang++
         sudo make install DESTDIR=/fs PREFIX=/usr

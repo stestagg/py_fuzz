@@ -11,6 +11,10 @@ __pycache__/
 .uv-pfrun-cache/
 .claude/
 cache/
+.env
+.env.*
+!.env.example
+.openai_key
 
 # Generated analysis/output directories
 analysis/

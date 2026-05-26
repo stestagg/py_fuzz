@@ -1,0 +1,31 @@
+diff --git a/Parser/tokenizer/utf8_tokenizer.c b/Parser/tokenizer/utf8_tokenizer.c
+index 1a925f44540..0e9df3d6fb1 100644
+--- a/Parser/tokenizer/utf8_tokenizer.c
++++ b/Parser/tokenizer/utf8_tokenizer.c
+@@ -32,10 +32,15 @@ _PyTokenizer_FromUTF8(const char *str, int exec_input, int preserve_crlf)
+ {
+     struct tok_state *tok = _PyTokenizer_tok_new();
+     char *translated;
+-    if (tok == NULL)
++    if (tok == NULL) {
++        PyErr_NoMemory();
+         return NULL;
++}
+     tok->input = translated = _PyTokenizer_translate_newlines(str, exec_input, preserve_crlf, tok);
+     if (translated == NULL) {
++    if (tok->done == E_NOMEM) {
++        PyErr_NoMemory();
++    }
+         _PyTokenizer_Free(tok);
+         return NULL;
+     }
+@@ -44,6 +49,9 @@ _PyTokenizer_FromUTF8(const char *str, int exec_input, int preserve_crlf)
+     tok->str = translated;
+     tok->encoding = _PyTokenizer_new_string("utf-8", 5, tok);
+     if (!tok->encoding) {
++       if (tok->done == E_NOMEM) {
++          PyErr_NoMemory();
++       }
+         _PyTokenizer_Free(tok);
+         return NULL;
+     }

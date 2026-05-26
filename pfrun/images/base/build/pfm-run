@@ -2,6 +2,9 @@
 
 set -u
 
+ulimit -Hn 4194304
+ulimit -Sn 4194304
+
 BLUE='\033[34m'
 GREEN='\033[32m'
 RED='\033[31m'

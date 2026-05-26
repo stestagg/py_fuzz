@@ -24,6 +24,13 @@ fi
 
 cd "$CHECKOUT_ROOT"
 
+if [ -d /pfm/tactical-patches ]; then
+    for _patch in /pfm/tactical-patches/*.diff /pfm/tactical-patches/*.patch; do
+        [ -f "$_patch" ] || continue
+        git apply "$_patch"
+        echo "Applied tactical patch: $_patch"
+    done
+fi
 
 export LTOWRAP_ENABLE=0
 if [ -e /tmp/ltowrap.json ]; then

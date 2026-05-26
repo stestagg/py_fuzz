@@ -17,6 +17,9 @@ mkdir -p "$root_dir" /out
 
 debugfs -R "rdump / $root_dir" "$base_fs"
 
+sed -i 's/^fs\.file-max.*/fs.file-max = 4194304/' "$root_dir/etc/sysctl.conf"
+grep -q 'fs\.nr_open' "$root_dir/etc/sysctl.conf" || printf 'fs.nr_open = 4194304\n' | tee -a "$root_dir/etc/sysctl.conf" >/dev/null
+
 cat > /tmp/pacman-lean.conf << 'EOF'
 [options]
 HoldPkg     = pacman glibc

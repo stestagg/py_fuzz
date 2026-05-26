@@ -16,15 +16,25 @@ def is_crash(returncode: int) -> bool:
     return returncode < 0
 
 
-def run_script(script: str) -> int:
+def run_script(script: str, process_mem_limit) -> int:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(script)
         tmp = f.name
     try:
+        cmdline = [PYTHON, tmp]
+        env = os.environ.copy()
+
+        if process_mem_limit > 0:
+            env['MEM_LIMIT_MB'] = str(process_mem_limit)
+            env['MEM_LIMIT_EXEC'] = PYTHON
+            cmdline[0] = '/pfm/tools/mem_limit_exec'
+        print(f"running: {' '.join(cmdline)}", file=sys.stderr)
+ 
         result = subprocess.run(
-            [PYTHON, tmp],
+            cmdline,
             timeout=TIMEOUT,
             capture_output=True,
+            env=env,
         )
         return result.returncode
     except subprocess.TimeoutExpired:
@@ -65,9 +75,11 @@ def assemble(header: str, sections: list[tuple[str, str]]) -> str:
 
 
 def minimize(script_path: Path) -> str:
+    process_mem_limit = int(os.environ.get('PFM_EXEC_MEM_LIMIT', 0) or 0)
+    print(f"process memory limit: {process_mem_limit} MB" if process_mem_limit > 0 else "no process memory limit", file=sys.stderr)
     script = script_path.read_text()
 
-    rc = run_script(script)
+    rc = run_script(script, process_mem_limit)
     if not is_crash(rc):
         print(f"error: original script did not crash (exit {rc})", file=sys.stderr)
         sys.exit(1)
@@ -83,7 +95,7 @@ def minimize(script_path: Path) -> str:
         removed_this_pass = 0
         while i < len(sections):
             candidate = sections[:i] + sections[i + 1:]
-            rc = run_script(assemble(header, candidate))
+            rc = run_script(assemble(header, candidate), process_mem_limit)
             if is_crash(rc):
                 print(f"  removed {sections[i][0]}", file=sys.stderr)
                 sections = candidate

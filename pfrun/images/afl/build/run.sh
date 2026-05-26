@@ -16,6 +16,10 @@ sudo rm -rf "$root_dir"
 sudo mkdir -p "$root_dir" /out
 
 sudo debugfs -R "rdump / $root_dir" "$base_fs"
+
+sudo sed -i 's/^fs\.file-max.*/fs.file-max = 4194304/' "$root_dir/etc/sysctl.conf"
+grep -q 'fs\.nr_open' "$root_dir/etc/sysctl.conf" || printf 'fs.nr_open = 4194304\n' | sudo tee -a "$root_dir/etc/sysctl.conf" >/dev/null
+
 sudo rm -rf "$root_dir"/var/cache/pacman/pkg/*
 
 sudo mkdir -p "$root_dir/etc/sysctl.d"

@@ -1,0 +1,26 @@
+diff --git a/src/afl-forkserver.c b/src/afl-forkserver.c
+index 11b0920b..1e2cc323 100644
+--- a/src/afl-forkserver.c
++++ b/src/afl-forkserver.c
+@@ -393,13 +393,18 @@ static inline u32 afl_futex_wait(afl_forkserver_t *fsrv, u32 timeout_ms,
+   for (;;) {
+ 
+     u32 fval = __atomic_load_n(fsrv->child_sync, __ATOMIC_ACQUIRE);
+-    if (fval == AFL_CHILD_DONE || fval == AFL_CHILD_EXITED) { return fval; }
++    if (fval == AFL_CHILD_DONE) { return fval; }
++    if (fval == AFL_CHILD_EXITED) { 
++      DEBUGF("futex wait: child_sync=%u, child_pid=%d complete signal, returning\n", fval, fsrv->child_pid);
++      return fval;
++    }
+ 
+     /* Fast path: check timeout & stop before sleeping */
+     if (fsrv->last_run_timed_out || unlikely(*stop_soon_p)) {
+-
++      DEBUGF("futex wait: timeout or stop soon, child_sync=%u, child_pid=%d\n", fval, fsrv->child_pid);
+       if (fsrv->child_pid > 0) {
+-
++        DEBUGF("futex wait: killing child (PID %d) with signal %d\n", fsrv->child_pid,
++               fsrv->child_kill_signal);
+         /* Write EXITED before sending the OS signal.  A child using a
+            non-fatal child_kill_signal (e.g. SIGTERM) will see AFL_CHILD_EXITED
+            in its futex wait loop and call _exit() cleanly instead of starting

@@ -16,7 +16,11 @@ echo Configure Complete, making
 make -j4 >>$OUT 2>&1 || exit 125
 echo Make Complete, running
 
-./python "/pfm/bisect_script/$SCRIPT_NAME.py" >>$OUT 2>&1
+if [ -n "$MEM_LIMIT" ]; then
+    (ulimit -v $((MEM_LIMIT * 1024)); ./python "/pfm/scratch/bisect/$SCRIPT_NAME.py") >>$OUT 2>&1
+else
+    ./python "/pfm/scratch/bisect/$SCRIPT_NAME.py" >>$OUT 2>&1
+fi
 rc=$?
 
 echo Run finished, resetting repo

@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 CPYTHON_DIR = Path("/src/cpython")
-DIST_SCRIPT_DIR = Path("/pfm/dist_script")
+DIST_SCRIPT_DIR = Path("/pfm/scratch/dist")
 DIST_BUILDS_DIR = Path("/pfm/cache/dist-builds")
 BUILDER_ID = "archlinux-cpython-dist-v1"
 

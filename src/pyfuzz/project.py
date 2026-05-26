@@ -73,7 +73,7 @@ class Project:
         config_path = root / "config" / "project.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text("{}")
-        skel_dirs = ['py', 'cpython', 'inputs', 'outputs', 'cores', 'artifacts', 'logs', 'tools', 'envs']
+        skel_dirs = ['py', 'cpython', 'inputs', 'outputs', 'cores', 'artifacts', 'logs', 'tools', 'envs', 'scratch']
         for d in skel_dirs:
             (root / d).mkdir()
         return cls.load(name)
@@ -96,3 +96,7 @@ class Project:
     @property
     def actual_vm_mem(self) -> int:
         return self.vm_mem if not self.asan else self.vm_mem * 3
+
+    @property
+    def actual_hard_mem_limit(self):
+        return min(self.actual_fuzz_mem_limit, self.actual_vm_mem)

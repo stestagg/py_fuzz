@@ -102,9 +102,15 @@ class Env:
         mounts.append((self.project.path("config"), False))
         mounts.append((root_path("src"), False))
 
+        scratch_dir = self.project.path('scratch')
+        if not scratch_dir.exists():
+            scratch_dir.mkdir()
+        mounts.append((scratch_dir, self.image != Image.AFL))
+
         if self.image == Image.BUILD:
             mounts.append((root_path('helpers'), False))
             mounts.append((root_path("pfrun") / "images" / "build" / "build_scripts", False))
+            mounts.append((root_path("tactical-patches"), False))
             mounts.append((self.project.path("py"), True))
             mounts.append((self.project.path("cpython"), True))
             mounts.append((self.project.path('tools'), True))
@@ -129,8 +135,10 @@ class Env:
 
         if self.image == Image.LLDB:
             mounts.append((self.project.path('py'), False))
+            mounts.append((self.project.path("cpython"), False))
             mounts.append((self.project.path('tools'), False))
             mounts.append((root_path('helpers'), False))
+            
             mounts.append((self.project.path('inputs'), False))
             mounts.append((self.project.path('outputs'), True))
             mounts.append((self.project.path('logs'), False))
@@ -139,11 +147,7 @@ class Env:
             if self.project.track_inputs:
                 mounts.append((self.project.path("input_tracks"), True))
 
-        if self.image == Image.BISECT:
-            mounts.append((self.project.path('bisect_script'), False))
-
         if self.image == Image.DIST:
-            mounts.append((self.project.path('dist_script'), False))
             mounts.append((root_path('cache'), True))
 
         return mounts

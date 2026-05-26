@@ -106,49 +106,69 @@ Relevance to reproduction: a single AFL input may not recreate the failure in a
 fresh process, while the linked core can still preserve the state of the
 persistent worker that crashed.
 
-## `analyze lldb HASH`
+## `analyze lldb`
 
 ```sh
 ./pfx analyze lldb <artifact-hash>
+./pfx analyze lldb <artifact-hash> --output <path>
+./pfx analyze lldb <artifact-hash> --interactive
+./pfx analyze lldb <path/to/script.py> --output <path>
+./pfx analyze lldb <path/to/script.py> --interactive
 ```
 
-Runs LLDB-backed analysis for one artifact and writes:
+Runs LLDB-backed analysis inside the project's LLDB VM environment. The first
+positional argument is interpreted as an artifact hash when it contains no `/`,
+or as a local Python script path when it does.
+
+**Hash mode** loads a saved core or replays a crash input against the project
+fuzz target, exactly as before. Output defaults to:
 
 ```sh
 projects/<project>/artifacts/<artifact-hash>/lldb.txt
 ```
 
-For a core artifact, it loads the saved core. For a crash artifact, it launches
-the project fuzz target with the artifact's `input.txt` as stdin. The default
-LLDB command set is:
+**Script mode** copies the script into `projects/<project>/scratch/lldb/` (if
+not already inside `scratch/`), then feeds it to the fuzz target as a crash
+input in LLDB. The `--output` option is required in non-interactive script mode.
+
+In both modes, `--output PATH` overrides the VM output path. `PATH` is relative
+to `/pfm/` inside the VM — for example `scratch/lldb/out.txt` writes to
+`projects/<project>/scratch/lldb/out.txt` on the host.
+
+The default LLDB command set is:
 
 - `thread list`
 - `bt all`
 - `register read`
 
-When analyzing a crash artifact, the helper also applies the project's fuzz
-memory limit unless ASAN disables that limit.
+The project's fuzz memory limit is applied to crash and script inputs unless
+ASAN disables that limit.
 
 Relevant output:
 
 - Stop reason and thread list
 - Full backtraces
 - Register state
-- For crash artifacts, explicit clean-exit or timeout messages when the input
-  does not recreate a crash in that LLDB launch
+- For crash/script inputs, explicit clean-exit or timeout messages when the
+  input does not recreate a crash in that LLDB launch
 
 Example command shapes:
 
 ```sh
 ./pfx analyze lldb <crash-hash>
 ./pfx analyze lldb <core-hash>
+./pfx analyze lldb <crash-hash> --interactive
+./pfx analyze lldb path/to/repro.py --output scratch/lldb/repro.txt
+./pfx analyze lldb projects/<project>/scratch/reproducers/repro-1.py --output scratch/lldb/repro-1.txt
+./pfx analyze lldb path/to/repro.py --interactive
 ./pfx analyze query file:lldb.txt re:lldb.txt:"process exited cleanly"
 ./pfx analyze query file:lldb.txt re:lldb.txt:"SIGSEGV|SIGBUS|Py_FatalError"
 ```
 
 Relevance to reproduction: it separates inputs that reproduce as standalone
 crashes from artifacts that only make sense through the original core or a
-longer input history.
+longer input history. Script mode lets an arbitrary reproducer be run in the
+same fuzz environment without first registering it as an artifact.
 
 ## `analyze query CLAUSE...`
 
@@ -248,19 +268,22 @@ and emits a Python script containing:
 - Periodic `gc.collect()` calls mirroring the harness cadence
 
 With `--all=<base-name>`, it scans core artifacts with `lldb.txt`, extracts the
-stopped PID from LLDB output, finds matching input tracks, and writes scripts to
-the project `config/` directory.
+stopped PID from LLDB output, finds matching input tracks, and writes scripts to:
+
+```sh
+projects/<project>/scratch/reproducers/
+```
 
 Relevant output:
 
-- Reproducer scripts such as `projects/<project>/config/repro-1.py`
+- Reproducer scripts such as `projects/<project>/scratch/reproducers/repro-1.py`
 - Marked sections that can later be minimized or inspected
 
 Example command shapes:
 
 ```sh
 ./pfx track-script --all=repro
-./pfx track-script w4 1332.1778668698 projects/<project>/config/repro-1332.py
+./pfx track-script w4 1332.1778668698 projects/<project>/scratch/reproducers/repro-1332.py
 ```
 
 Relevance to reproduction: it captures persistent-process history rather than
@@ -285,7 +308,8 @@ Relevant environment paths:
 - `/pfm/py`: built Python tree
 - `/pfm/tools`: fuzz targets and helper binaries
 - `/pfm/helpers`: helper scripts
-- `/pfm/config`: project configuration and generated scripts
+- `/pfm/config`: project configuration
+- `/pfm/scratch`: general-purpose read-write workspace (subdirs: `lldb/`, `reproducers/`, `dist/`, `bisect/`)
 - `/pfm/artifacts`: analysis artifacts
 - `/pfm/cores`: raw cores
 - `/pfm/input_tracks`: tracked per-iteration inputs, when present
@@ -293,8 +317,8 @@ Relevant environment paths:
 Example command shapes:
 
 ```sh
-./pfx run-cmd --image lldb /pfm/py/bin/python3 /pfm/config/repro-1.py
-./pfx run-cmd --image lldb /pfm/py/bin/python3 /pfm/helpers/minimize_crash.py /pfm/config/repro-1.py
+./pfx run-cmd --image lldb /pfm/py/bin/python3 /pfm/scratch/reproducers/repro-1.py
+./pfx run-cmd --image lldb /pfm/py/bin/python3 /pfm/helpers/minimize_crash.py /pfm/scratch/reproducers/repro-1.py
 ./pfx shell --image lldb
 ```
 
@@ -335,7 +359,7 @@ environment variables such as `PYTHON`, `DIST_BUILD_ROOT`, `DIST_SCRIPT`, and
 
 Relevant output:
 
-- A copied script under `projects/<project>/dist_script/`
+- A copied script under `projects/<project>/scratch/dist/`
 - A cached CPython install under `cache/dist-builds/`
 - The resolved CPython commit and build-cache path
 - The script's exit status when run under the built Python
@@ -343,11 +367,11 @@ Relevant output:
 Example command shapes:
 
 ```sh
-./pfx run-dist projects/prs-3/config/repro-accessories-flea-alot-mistook.py
-./pfx run-dist projects/<project>/config/repro-1.py --ref v3.14.0a7
-./pfx run-dist projects/<project>/config/repro-1.py --debug
-./pfx run-dist projects/<project>/config/repro-1.py --env PYTHONMALLOC=debug
-./pfx run-dist projects/<project>/config/repro-1.py --interactive
+./pfx run-dist projects/<project>/scratch/reproducers/repro-1.py
+./pfx run-dist projects/<project>/scratch/reproducers/repro-1.py --ref v3.14.0a7
+./pfx run-dist projects/<project>/scratch/reproducers/repro-1.py --debug
+./pfx run-dist projects/<project>/scratch/reproducers/repro-1.py --env PYTHONMALLOC=debug
+./pfx run-dist projects/<project>/scratch/reproducers/repro-1.py --interactive
 ```
 
 Relevance to reproduction: this is the verification tool for reproducers. It
@@ -363,20 +387,19 @@ harness, LLDB image, or persistent AFL environment.
 ./pfx bisect <script.py> --configure-args '<extra configure args>'
 ```
 
-Copies a Python reproducer script into the project's `bisect_script/` directory
-and starts the bisect environment. `--ccache` enables compiler caching for the
-run. `--configure-args` passes additional arguments through to CPython's
-`./configure`.
+Copies a Python reproducer script into `projects/<project>/scratch/bisect/` and
+starts the bisect environment. `--ccache` enables compiler caching for the run.
+`--configure-args` passes additional arguments through to CPython's `./configure`.
 
 Relevant output:
 
-- A copy of the reproducer under `projects/<project>/bisect_script/`
+- A copy of the reproducer under `projects/<project>/scratch/bisect/`
 - An interactive bisect environment for checking the reproducer across builds
 
 Example command shape:
 
 ```sh
-./pfx bisect projects/<project>/config/repro-1.py --ccache
+./pfx bisect projects/<project>/scratch/reproducers/repro-1.py --ccache
 ```
 
 Relevance to reproduction: it connects a standalone reproducer to the CPython

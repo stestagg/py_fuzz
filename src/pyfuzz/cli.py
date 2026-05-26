@@ -169,18 +169,25 @@ def fuzz(ctx, instances, no_monitor, afl_debug, no_notify):
     click.echo(f"Fuzzing complete for project: {ctx.obj['project']}")
 
 
-@cli.command("track-script")
+@cli.group("tracks")
+@click.pass_context
+def tracks(ctx):
+    """Commands for working with FUZZ_TRACK_INPUTS data."""
+    pass
+
+
+@tracks.command("reproducer")
 @click.argument("worker_id", required=False)
-@click.argument("pid_timestamp", required=False)
+@click.argument("pid", required=False)
 @click.argument("out_path", type=click.Path(), required=False)
 @click.option("--all", "base", metavar="BASE", default=None,
-              help="Generate scripts for all cores, saving as config/<BASE>-N.py")
+              help="Generate scripts for all cores, saving as scratch/reproducers/<BASE>-N.py")
 @click.pass_context
-def track_script(ctx, worker_id, pid_timestamp, out_path, base):
-    """Combine input track files into a reproducible Python script.
+def tracks_reproducer(ctx, worker_id, pid, out_path, base):
+    """Combine a .inputs track file into a reproducible Python script.
 
     With --all=BASE, scans all core artifacts, extracts the PID from each
-    lldb.txt, finds the matching input track, and writes config/<BASE>-N.py
+    lldb.txt, finds the matching .inputs file, and writes scratch/reproducers/<BASE>-N.py
     (skipping files that already exist).
     """
     from .trackscript import build_track_script, generate_all_track_scripts
@@ -199,15 +206,39 @@ def track_script(ctx, worker_id, pid_timestamp, out_path, base):
                 click.echo(f"Skipped {out} (already exists)")
         return
 
-    if not worker_id or not pid_timestamp or not out_path:
+    if not worker_id or not pid or not out_path:
         raise click.UsageError(
-            "Provide worker_id, pid_timestamp, and out_path, or use --all=BASE"
+            "Provide worker_id, pid, and out_path, or use --all=BASE"
         )
-    script = build_track_script(project, worker_id, pid_timestamp)
+    inputs_path = project.path("input_tracks") / worker_id / f"{pid}.inputs"
+    script = build_track_script(inputs_path, worker_id=worker_id)
     out = Path(out_path)
     out.write_text(script)
     line_count = script.count("\n")
     click.echo(f"Wrote {out} ({line_count} lines)")
+
+
+@tracks.command("show")
+@click.argument("inputs_file", type=click.Path(exists=True, path_type=Path))
+def tracks_show(inputs_file):
+    """Parse a .inputs file and display each recorded input with a separator."""
+    from .trackscript import parse_inputs_file
+
+    inputs = parse_inputs_file(inputs_file)
+    if not inputs:
+        click.echo("No inputs found in file.")
+        return
+
+    CYAN = '\033[36m'
+    RESET = '\033[0m'
+
+    for i, raw in enumerate(inputs, 1):
+        click.echo(f"{CYAN}# -=-=-=-=-=-=- input {i} -=-=-=-=-=-=-{RESET}")
+        null_pos = raw.find(b'\x00')
+        content = raw[:null_pos] if null_pos != -1 else raw
+        click.echo(content.decode('utf-8', errors='replace'))
+
+    click.echo(f"\n{len(inputs)} input(s) in {inputs_file.name}")
 
 
 @cli.command("make-dict")
@@ -235,6 +266,88 @@ def monitor(ctx, interval, once, no_notify):
         pass
 
 
+@cli.group("llm")
+@click.option("--model", default=None, help="OpenAI model to use for LLM commands.")
+@click.pass_context
+def llm(ctx, model):
+    from .llm import DEFAULT_OPENAI_MODEL, LLMError, create_openai_client
+
+    try:
+        ctx.obj["openai_client"] = create_openai_client()
+    except LLMError as exc:
+        raise click.ClickException(str(exc)) from exc
+    ctx.obj["llm_model"] = model or os.environ.get("PYFUZZ_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+
+
+@llm.command("check")
+@click.pass_context
+def llm_check(ctx):
+    from .llm import LLMError, check_openai_connection
+
+    async def run_check():
+        return await check_openai_connection(ctx.obj["openai_client"], ctx.obj["llm_model"])
+
+    try:
+        result = asyncio.run(run_check())
+    except LLMError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(
+            f"OpenAI API check failed ({type(exc).__name__}): {exc}"
+        ) from exc
+
+    click.echo(f"OpenAI API connection OK ({ctx.obj['llm_model']}): {result.message}")
+
+
+@llm.command("classify")
+@click.option("--text", "extra_text", default=None, help="Additional guidance for classifying artifacts.")
+@click.option("--classes", "classes_text", required=True, help="Comma-separated class labels.")
+@click.option("--dest", required=True, help="Filename in each artifact directory for the result.")
+@click.option("--force", is_flag=True, help="Overwrite an existing destination file.")
+@click.option("--rationale", is_flag=True, help="Ask for a rationale and store JSON instead of just the label.")
+@click.argument("artifact_hashes", nargs=-1, required=True)
+@click.pass_context
+def llm_classify(ctx, extra_text, classes_text, dest, force, rationale, artifact_hashes):
+    from .llm import LLMError, classify_artifacts, parse_class_labels
+
+    try:
+        labels = parse_class_labels(classes_text)
+    except LLMError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    project = Project.load(ctx.obj["project"])
+
+    try:
+        results = asyncio.run(
+            classify_artifacts(
+                ctx.obj["openai_client"],
+                project,
+                list(artifact_hashes),
+                labels,
+                dest,
+                ctx.obj["llm_model"],
+                extra_text=extra_text,
+                force=force,
+                include_rationale=rationale,
+            )
+        )
+    except LLMError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    failures = []
+    for result in results:
+        if result.status == "written":
+            click.echo(f"{result.artifact_hash}: {result.label} -> {result.dest.name}")
+        elif result.status == "skipped":
+            click.echo(f"{result.artifact_hash}: skipped ({result.dest.name} exists)")
+        else:
+            failures.append(result)
+            click.echo(f"{result.artifact_hash}: failed: {result.error}", err=True)
+
+    if failures:
+        raise click.ClickException(f"{len(failures)} artifact classification(s) failed.")
+
+
 @cli.group("analyze")
 @click.pass_context
 def analyze(ctx):
@@ -242,13 +355,22 @@ def analyze(ctx):
 
 
 @analyze.command("lldb")
-@click.argument("hash")
+@click.argument("target")
+@click.option("--interactive", is_flag=True, default=False, help="Launch an interactive lldb session instead of running automated analysis.")
+@click.option("--output", default=None, metavar="PATH", help="Output path under /pfm/ in the VM (e.g. scratch/lldb/out.txt). Required for script mode; defaults to artifacts/<hash>/lldb.txt for hash mode.")
 @click.pass_context
-def analyze_lldb(ctx, hash):
-    from .lldb import analyze_core
+def analyze_lldb(ctx, target, interactive, output):
     project = Project.load(ctx.obj["project"])
-    asyncio.run(analyze_core(project, hash))
-    click.echo(f"Analysis complete: artifacts/{hash}/")
+    if '/' in target:
+        from .lldb import run_script_in_lldb
+        if not interactive and output is None:
+            raise click.UsageError("--output is required for script mode (non-interactive)")
+        asyncio.run(run_script_in_lldb(project, Path(target), interactive=interactive, output=output))
+    else:
+        from .lldb import analyze_core
+        asyncio.run(analyze_core(project, target, interactive=interactive, output=output))
+        if not interactive:
+            click.echo(f"Analysis complete: artifacts/{target}/")
 
 
 @analyze.command("script")
@@ -331,12 +453,13 @@ def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args)
 @click.argument("script", type=click.Path(exists=True, path_type=Path))
 @click.option("--ccache", is_flag=True, default=False, help="Wrap compiler with ccache (local to this run)")
 @click.option("--configure-args", default="", help="Extra arguments to pass to ./configure")
+@click.option("-m", "--mem-limit", type=int, default=None, help="Memory limit in MB applied as ulimit when running test script")
 @click.pass_context
-def bisect_cmd(ctx, script, ccache, configure_args):
+def bisect_cmd(ctx, script, ccache, configure_args, mem_limit):
     from .bisect import run_bisect
     project = Project.load(ctx.obj["project"])
     try:
-        asyncio.run(run_bisect(project, script, ccache=ccache, configure_args=configure_args))
+        asyncio.run(run_bisect(project, script, ccache=ccache, configure_args=configure_args, mem_limit=mem_limit))
     except KeyboardInterrupt:
         pass
 

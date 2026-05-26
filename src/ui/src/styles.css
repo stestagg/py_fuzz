@@ -307,7 +307,7 @@ button {
 
 .artifact-panel {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   padding: 10px;
   overflow: hidden;
 }
@@ -323,6 +323,113 @@ button {
   overflow-y: auto;
   height: 100%;
   padding-top: 4px;
+}
+
+.artifact-grouping-wrap {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 5px 0 7px;
+}
+
+.artifact-grouping-editor {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.grouping-chip,
+.grouping-add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  padding: 2px;
+}
+
+.grouping-chip-label,
+.grouping-chip-input,
+.grouping-add-input {
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+  font-size: 11px;
+  color: #2d4049;
+}
+
+.grouping-chip-label {
+  max-width: 145px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  cursor: text;
+}
+
+.grouping-chip-input,
+.grouping-add-input {
+  height: 22px;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.grouping-chip-input {
+  width: 120px;
+}
+
+.grouping-add-input {
+  width: 98px;
+}
+
+.grouping-add-input::placeholder {
+  color: #849099;
+}
+
+.grouping-chip-step,
+.grouping-chip-remove,
+.grouping-add-button {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.grouping-chip-step:hover,
+.grouping-chip-remove:hover,
+.grouping-add-button:hover {
+  color: #172026;
+  background: #e9f0f2;
+}
+
+.grouping-chip-step:disabled {
+  color: #b6c0c5;
+  cursor: default;
+  background: transparent;
+}
+
+.grouping-chip-remove:hover {
+  color: var(--danger);
+}
+
+.grouping-error {
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .tree-empty {
@@ -376,6 +483,18 @@ button {
   padding: 0;
   list-style: none;
   padding-left: 14px;
+}
+
+.tree-group-node {
+  min-width: 0;
+}
+
+.tree-group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tree-leaf-button {

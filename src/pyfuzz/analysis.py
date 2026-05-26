@@ -2,6 +2,7 @@ import asyncio
 import json
 from enum import Enum
 from pathlib import Path
+from typing import Mapping
 
 import odhash
 
@@ -47,6 +48,79 @@ class Artifact:
         return f"Artifact({self.hash!r})"
 
 
+DEFAULT_LLM_SECTION_LIMITS = {
+    "metadata": 2_000,
+    "input": 8_000,
+    "lldb": 40_000,
+    "analysis": 16_000,
+}
+
+TRANSIENT_META_KEYS = {
+    "pid",
+    "source_filename",
+    "timestamp",
+    "worker",
+}
+
+
+def _truncate_middle(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+
+    marker = f"\n\n... [truncated {len(text) - max_chars:,} chars from middle] ...\n\n"
+    if max_chars <= len(marker):
+        return text[:max_chars]
+
+    keep = max_chars - len(marker)
+    head = keep // 2
+    tail = keep - head
+    return text[:head].rstrip() + marker + text[-tail:].lstrip()
+
+
+def _format_llm_section(title: str, body: str, max_chars: int) -> str:
+    return f"## {title}\n{_truncate_middle(body.strip(), max_chars)}"
+
+
+def _bytes_for_llm(data: bytes) -> str:
+    text = data.decode("utf-8", errors="backslashreplace")
+    return "".join(
+        ch
+        if ch in "\n\r\t" or ord(ch) >= 32
+        else f"\\x{ord(ch):02x}"
+        for ch in text
+    )
+
+
+def _parse_afl_source_filename(name: str) -> dict[str, str]:
+    fields = {}
+    for part in name.split(","):
+        key, sep, value = part.partition(":")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def _llm_metadata(artifact: Artifact) -> str:
+    meta = {
+        "artifact_hash": artifact.hash,
+        "type": artifact.type.value,
+    }
+    for key, value in artifact.meta.items():
+        if key in TRANSIENT_META_KEYS:
+            continue
+        meta[key] = value
+
+    source_filename = artifact.meta.get("source_filename")
+    if isinstance(source_filename, str):
+        afl_fields = _parse_afl_source_filename(source_filename)
+        if "sig" in afl_fields:
+            meta["signal"] = afl_fields["sig"]
+        if "op" in afl_fields:
+            meta["fuzzer_operation"] = afl_fields["op"]
+
+    return json.dumps(meta, indent=2, sort_keys=True)
+
+
 def _iter_sources(project: Project):
     cores_dir = project.path("cores")
     if cores_dir.exists():
@@ -90,6 +164,8 @@ def _create_artifact(artifact_dir: Path, source: Path, atype: ArtifactType) -> N
         meta["worker"] = source.parent.parent.name
         meta["source_filename"] = source.name
         (artifact_dir / "input.txt").write_bytes(source.read_bytes())
+        up_to_first_null = source.read_bytes().split(b"\x00", 1)[0]
+        (artifact_dir / "input_clean.txt").write_bytes(up_to_first_null)
     (artifact_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
 
@@ -170,3 +246,62 @@ def get_artifact(project: Project, hash: str) -> Artifact:
     if not artifact.dir.exists():
         raise FileNotFoundError(f"Artifact not found: {hash}")
     return artifact
+
+
+def render_artifact_llm_view(
+    project: Project,
+    artifact_hash: str,
+    require_lldb: bool = True,
+    section_limits: Mapping[str, int] | None = None,
+    exclude_filenames: set[str] | None = None,
+) -> str:
+    """Render an artifact as compact context suitable for an LLM prompt."""
+    artifact = get_artifact(project, artifact_hash)
+    limits = {**DEFAULT_LLM_SECTION_LIMITS, **(section_limits or {})}
+    excluded = {"input.txt", "lldb.txt", *(exclude_filenames or set())}
+    lldb_path = artifact.dir / "lldb.txt"
+
+    if require_lldb and not lldb_path.exists():
+        raise FileNotFoundError(
+            f"Artifact {artifact_hash} has no lldb.txt; run analysis first."
+        )
+
+    sections = [
+        _format_llm_section("Artifact Metadata", _llm_metadata(artifact), limits["metadata"]),
+    ]
+
+    input_path = artifact.dir / "input.txt"
+    if input_path.exists():
+        input_bytes = input_path.read_bytes()
+        input_text = _bytes_for_llm(input_bytes)
+        sections.append(
+            _format_llm_section(
+                f"Crash Input (input.txt, {len(input_bytes):,} bytes)",
+                input_text,
+                limits["input"],
+            )
+        )
+
+    if lldb_path.exists():
+        lldb_text = lldb_path.read_text(errors="replace")
+        sections.append(
+            _format_llm_section(
+                f"LLDB Analysis (lldb.txt, {len(lldb_text):,} chars)",
+                lldb_text,
+                limits["lldb"],
+            )
+        )
+
+    for path in sorted(artifact.dir.glob("*.txt")):
+        if path.name in excluded:
+            continue
+        text = path.read_text(errors="replace")
+        sections.append(
+            _format_llm_section(
+                f"Additional Analysis ({path.name}, {len(text):,} chars)",
+                text,
+                limits["analysis"],
+            )
+        )
+
+    return "\n\n".join(sections) + "\n"

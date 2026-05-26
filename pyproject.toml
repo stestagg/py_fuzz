@@ -7,7 +7,9 @@ dependencies = [
   "click",
   "jinja2",
   "json-repair",
-  "odhash"
+  "odhash",
+  "openai",
+  "pydantic"
 ]
 
 [tool.setuptools.packages.find]

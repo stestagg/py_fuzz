@@ -315,6 +315,7 @@ private final class LinuxVirtRunner: @unchecked Sendable {
             "console=hvc0",
             "root=fe00",
             "ro",
+            "random.trust_cpu=on",
             "pfmscript=\(script)",
         ]
         if let envFile = options.envFile {

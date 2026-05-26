@@ -7,7 +7,7 @@ import hashlib
 import json
 import mimetypes
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,15 @@ from pyfuzz.lldb import analyze_core  # noqa: E402
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DIST_DIR = REPO_ROOT / "src" / "ui" / "dist"
+GROUP_FILE_READ_LIMIT = 4096
+GROUP_LABEL_LIMIT = 100
+
+
+@dataclass(frozen=True)
+class ArtifactGroupSpec:
+    raw: str
+    kind: str
+    argument: str | None = None
 
 
 class HttpError(Exception):
@@ -101,7 +110,89 @@ def summary_payload(project: Project) -> dict[str, Any]:
         }
 
 
-def artifact_payload(artifact: Artifact) -> dict[str, Any]:
+def validate_group_filename(filename: str, prefix: str) -> str:
+    if not filename:
+        raise ValueError(f"{prefix}: requires a filename")
+    path = Path(filename)
+    if path.is_absolute() or filename in (".", "..") or "/" in filename or "\\" in filename:
+        raise ValueError(f"{prefix}: filename must be local to the artifact directory")
+    return filename
+
+
+def parse_artifact_group_spec(raw: str) -> ArtifactGroupSpec:
+    spec = str(raw).strip()
+    if not spec:
+        raise ValueError("Grouping spec cannot be empty")
+    if spec == "type":
+        return ArtifactGroupSpec(raw=spec, kind="type")
+
+    key, sep, rest = spec.partition(":")
+    if not sep:
+        raise ValueError(f"Unknown grouping spec {spec!r}")
+    if key == "file":
+        return ArtifactGroupSpec(raw=spec, kind="file", argument=validate_group_filename(rest, "file"))
+    if key == "exists":
+        return ArtifactGroupSpec(raw=spec, kind="exists", argument=validate_group_filename(rest, "exists"))
+    if key == "meta":
+        if not rest:
+            raise ValueError("meta: requires a key")
+        return ArtifactGroupSpec(raw=spec, kind="meta", argument=rest)
+    raise ValueError(f"Unknown grouping spec {spec!r}")
+
+
+def parse_artifact_group_specs(raw_specs: Any) -> list[ArtifactGroupSpec]:
+    if raw_specs is None:
+        return []
+    if not isinstance(raw_specs, list):
+        raise ValueError("groupSpecs must be a list")
+    return [parse_artifact_group_spec(str(spec)) for spec in raw_specs]
+
+
+def group_label(value: str) -> str:
+    label = " ".join(value.split())
+    if not label:
+        label = "(empty)"
+    if len(label) > GROUP_LABEL_LIMIT:
+        label = label[: GROUP_LABEL_LIMIT - 3].rstrip() + "..."
+    return label
+
+
+def stringify_meta_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True)
+
+
+def artifact_group_value(artifact: Artifact, spec: ArtifactGroupSpec) -> dict[str, str]:
+    if spec.kind == "type":
+        value = artifact.type.value
+        return {"value": value, "label": value}
+
+    argument = spec.argument or ""
+    if spec.kind == "meta":
+        if argument not in artifact.meta:
+            value = f"missing {argument}"
+        else:
+            value = stringify_meta_value(artifact.meta[argument])
+        return {"value": value, "label": group_label(value)}
+
+    path = artifact.dir / argument
+    if spec.kind == "exists":
+        value = f"has {argument}" if path.exists() else f"missing {argument}"
+        return {"value": value, "label": value}
+
+    if spec.kind == "file":
+        if not path.is_file():
+            value = f"missing {argument}"
+            return {"value": value, "label": value}
+        with path.open("rb") as handle:
+            value = handle.read(GROUP_FILE_READ_LIMIT).decode("utf-8", errors="replace")
+        return {"value": value, "label": group_label(value)}
+
+    raise ValueError(f"Unsupported grouping spec kind: {spec.kind}")
+
+
+def artifact_payload(artifact: Artifact, group_specs: list[ArtifactGroupSpec] | None = None) -> dict[str, Any]:
     input_path = artifact.dir / "input.txt"
     return {
         "hash": artifact.hash,
@@ -109,6 +200,10 @@ def artifact_payload(artifact: Artifact) -> dict[str, Any]:
         "path": str(artifact.dir),
         "hasInput": input_path.exists(),
         "inputSize": input_path.stat().st_size if input_path.exists() else None,
+        "groupValues": [
+            artifact_group_value(artifact, spec)
+            for spec in (group_specs or [])
+        ],
     }
 
 
@@ -177,11 +272,11 @@ def artifact_detail_payload(artifact: Artifact, project: Project) -> dict[str, A
     }
 
 
-async def artifacts_payload(project: Project) -> dict[str, Any]:
+async def artifacts_payload(project: Project, group_specs: list[ArtifactGroupSpec] | None = None) -> dict[str, Any]:
     artifacts = await list_artifacts(project)
     return {
         "artifacts": [
-            artifact_payload(artifact)
+            artifact_payload(artifact, group_specs)
             for artifact in sorted(artifacts, key=lambda item: (item.type.value, item.hash))
         ]
     }
@@ -271,7 +366,8 @@ class DashboardSocket:
             return {"summary": await asyncio.to_thread(summary_payload, self.project)}
 
         if message_type == "artifacts:list":
-            return await artifacts_payload(self.project)
+            group_specs = parse_artifact_group_specs(message.get("groupSpecs", []))
+            return await artifacts_payload(self.project, group_specs)
 
         if message_type == "artifacts:sync":
             created = await sync_artifacts(self.project)

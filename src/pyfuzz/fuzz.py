@@ -98,7 +98,8 @@ async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False)
         env['AFL_DEBUG'] = '1'
 
     logs_dir.mkdir(parents=True, exist_ok=True)
-    proc = await env.run(cmdline, vm_mem=project.actual_vm_mem, ncpu=project.ncpu)
+    proc = await env.run(cmdline, vm_mem=project.actual_vm_mem, ncpu=project.ncpu,
+                         dmesg_path=logs_dir / "kernel.log")
 
     await asyncio.gather(
         _stream_to_file(proc.stdout, logs_dir / "stdout.log"),
