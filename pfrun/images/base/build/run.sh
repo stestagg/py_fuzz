@@ -59,8 +59,9 @@ EOF
 
     sudo pacstrap -K -C /tmp/pacman-lean.conf /fs \
         filesystem glibc gcc-libs busybox \
-        python uv \
-        bzip2 gdbm libffi xz ncurses openssl readline sqlite zlib zstd
+        python uv bzip2 gdbm libffi xz ncurses \
+        openssl readline sqlite zlib zstd \
+        bpftrace linux-headers
 
     sudo rm -rf /fs/var/cache/pacman/pkg/*
     sudo rm -rf /fs/var/lib/pacman/sync/*
@@ -70,6 +71,7 @@ EOF
         cd AFLplusplus
         git log -n1
         git apply /build/fut_debug.diff
+        git apply /build/crash-pid-log.patch
         make PERFORMANCE=1 NO_PYTHON=1 NO_QEMU=1 AFL_NO_X86=1 NO_FRIDA=1 NO_UNICORN=1 \
             CC=clang CXX=clang++
         sudo make install DESTDIR=/fs PREFIX=/usr

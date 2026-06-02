@@ -37,6 +37,7 @@ async def run_dist(
     debug: bool = False,
     env_vars: tuple[str, ...] = (),
     configure_args: str = "",
+    mem: int | None = None,
 ) -> int:
     script_name = script_path.name
     dist_script_dir = project.path("scratch", "dist")
@@ -60,6 +61,6 @@ async def run_dist(
         script_env[key] = value
     env["DIST_SCRIPT_ENV_JSON"] = json.dumps(script_env, sort_keys=True, separators=(",", ":"))
 
-    proc = await env.run([], console=True, interactive=interactive)
+    proc = await env.run([], console=True, interactive=interactive, vm_mem=mem)
     await proc.wait()
     return proc.returncode or 0

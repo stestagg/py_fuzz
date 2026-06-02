@@ -48,14 +48,16 @@ async def docker_run(
     env_file.flush()
 
     ncpu = ncpu or env.project.ncpu
-    vm_mem = vm_mem or env.project.vm_mem
+    if vm_mem is None:
+        vm_mem = env.project.vm_mem
     cmd_str = shlex.join(str(part) for part in cmd)
     docker_cmd = [
         "docker", "run", "--rm",
         "--cpus", str(ncpu),
-        "--memory", f"{vm_mem}m",
         "--env-file", env_file.name,
     ]
+    if vm_mem > 0:
+        docker_cmd += ["--memory", f"{vm_mem}m"]
     if interactive:
         docker_cmd.append("-it")
     for mount_dir, is_writable in env.mounts:

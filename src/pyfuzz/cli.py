@@ -391,8 +391,8 @@ def analyze_script(ctx, out_name, batch_file, artifacts):
 def analyze_sync(ctx):
     from .analysis import sync_artifacts
     project = Project.load(ctx.obj["project"])
-    count = asyncio.run(sync_artifacts(project))
-    click.echo(f"Synced {count} new artifact(s)")
+    new_count, enriched = asyncio.run(sync_artifacts(project))
+    click.echo(f"Synced {new_count} new artifact(s), enriched {enriched} with log metadata")
 
 
 @analyze.command("link-core")
@@ -426,8 +426,9 @@ def analyze_query(ctx, clauses):
 @click.option("--debug", is_flag=True, default=False, help="Build CPython with --with-pydebug.")
 @click.option("--env", "env_vars", multiple=True, metavar="KEY=VALUE", help="Environment variable to pass to the script.")
 @click.option("--configure-args", default="", help="Extra arguments to pass to CPython ./configure.")
+@click.option("-M", "--mem", "mem", default=None, type=int, help="Memory limit in MB (0 or negative = unlimited; default: use configured vm_mem).")
 @click.pass_context
-def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args):
+def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args, mem):
     from .dist import run_dist
     project = Project.load(ctx.obj["project"])
     try:
@@ -440,6 +441,7 @@ def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args)
                 debug=debug,
                 env_vars=env_vars,
                 configure_args=configure_args,
+                mem=mem,
             )
         )
     except ValueError as e:

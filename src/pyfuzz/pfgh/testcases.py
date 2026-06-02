@@ -27,6 +27,8 @@ for the fuzzer rather than self-contained test cases.
 It's ok to diverge from the exact implication of the pr to cover more related areas.
 The PR may introduce a problem, or may indicate a general area of interest that should be explored by the fuzzer.
 
+CRITICAL: NEVER import ctypes, avoid threading where possible.
+
 Here is the PR description:
 {pr_description}
 

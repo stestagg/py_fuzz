@@ -30,7 +30,8 @@ def list(quiet, number, no, sort, asc):
     from .pr import load_prs
     df = load_prs()
     if sort:
-        df = df.sort_values(sort, ascending=asc)
+        sort_cols = [col.strip() for col in sort.split(",")]
+        df = df.sort_values(sort_cols, ascending=asc)
     if no:
         if no not in df.columns:
             print(f"WARNING: Column '{no}' not found in PR data, no filtering applied.")

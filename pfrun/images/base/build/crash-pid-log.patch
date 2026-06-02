@@ -1,0 +1,169 @@
+diff --git a/include/forkserver.h b/include/forkserver.h
+index 7d5de7e3..0870f6d4 100644
+--- a/include/forkserver.h
++++ b/include/forkserver.h
+@@ -110,6 +110,7 @@ typedef struct afl_forkserver {
+ 
+   s32 fsrv_pid,                         /* PID of the fork server           */
+       child_pid,                        /* PID of the fuzzed program        */
++      last_child_pid,                   /* PID of most recently run child   */
+       child_status,                     /* waitpid result for the child     */
+       out_dir_fd;                       /* FD of the lock file              */
+ 
+@@ -273,6 +274,8 @@ typedef enum fsrv_run_result {
+ 
+ void afl_fsrv_init(afl_forkserver_t *fsrv);
+ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from);
++const char *afl_fsrv_run_result_name(afl_forkserver_t *fsrv,
++                                     fsrv_run_result_t result);
+ void afl_fsrv_setup_preload(afl_forkserver_t *fsrv, char *argv0);
+ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
+                     volatile u8 *stop_soon_p, u8 debug_child_output);
+diff --git a/src/afl-forkserver.c b/src/afl-forkserver.c
+index 6ea1e210..417348a4 100644
+--- a/src/afl-forkserver.c
++++ b/src/afl-forkserver.c
+@@ -517,6 +517,7 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
+ 
+   /* exec related stuff */
+   fsrv->child_pid = -1;
++  fsrv->last_child_pid = -1;
+   fsrv->map_size = get_map_size();
+ 
+   /* IJON space allocation is handled by normal resize logic based on target's
+@@ -586,6 +587,7 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
+   // These are forkserver specific.
+   fsrv_to->out_dir_fd = -1;
+   fsrv_to->child_pid = -1;
++  fsrv_to->last_child_pid = -1;
+   fsrv_to->use_fauxsrv = 0;
+   fsrv_to->last_run_timed_out = 0;
+ 
+@@ -713,6 +715,60 @@ restart_poll:
+ 
+ }
+ 
++const char *afl_fsrv_run_result_name(afl_forkserver_t *fsrv,
++                                     fsrv_run_result_t result) {
++
++  switch (result) {
++
++    case FSRV_RUN_OK:
++      return "OK";
++
++    case FSRV_RUN_TMOUT:
++      return "TMOUT";
++
++    case FSRV_RUN_CRASH:
++      if (fsrv && WIFEXITED(fsrv->child_status)) {
++
++        if ((fsrv->uses_asan & 4) &&
++            WEXITSTATUS(fsrv->child_status) == MSAN_ERROR) {
++
++          return "MSAN";
++
++        }
++
++        if ((fsrv->uses_asan & 2) &&
++            WEXITSTATUS(fsrv->child_status) == LSAN_ERROR) {
++
++          return "LSAN";
++
++        }
++
++        if (fsrv->uses_crash_exitcode &&
++            WEXITSTATUS(fsrv->child_status) == fsrv->crash_exitcode) {
++
++          return "EXITCODE";
++
++        }
++
++      }
++
++      return "CRASH";
++
++    case FSRV_RUN_ERROR:
++      return "ERROR";
++
++    case FSRV_RUN_NOINST:
++      return "NOINST";
++
++    case FSRV_RUN_NOBITS:
++      return "NOBITS";
++
++  }
++
++  return "UNKNOWN";
++
++}
++
+ /* Read child_status from the forkserver pipe after a timeout, escalating
+    to SIGKILL if the configured child_kill_signal failed to terminate the
+    child within FORKSRV_KILL_GRACE_MS. child_kill_signal defaults to
+@@ -2638,6 +2694,7 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+   futex_read_status:
+     if (!read_status_or_escalate(fsrv, stop_soon_p)) { return 0; }
+ 
++    if (fsrv->child_pid > 0) { fsrv->last_child_pid = fsrv->child_pid; }
+     fsrv->child_pid = -1;
+     __atomic_store_n(fsrv->child_sync, AFL_CHILD_IDLE, __ATOMIC_RELEASE);
+     goto classify_result;
+@@ -2730,6 +2787,7 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+     /* EXITED or timeout/stop: read child status from forkserver pipe. */
+     if (!read_status_or_escalate(fsrv, stop_soon_p)) { return 0; }
+ 
++    if (fsrv->child_pid > 0) { fsrv->last_child_pid = fsrv->child_pid; }
+     fsrv->child_pid = -1;
+     __atomic_store_n(fsrv->child_sync, AFL_CHILD_IDLE, __ATOMIC_RELEASE);
+     goto classify_result;
+@@ -2749,6 +2807,7 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+     s32 tmp_pid = fsrv->child_pid;
+     if (tmp_pid > 0) {
+ 
++      fsrv->last_child_pid = tmp_pid;
+       kill(tmp_pid, fsrv->child_kill_signal);
+       fsrv->child_pid = -1;
+ 
+@@ -2787,7 +2846,12 @@ fsrv_run_result_t __attribute__((hot)) afl_fsrv_run_target(
+ 
+   }
+ 
+-  if (!WIFSTOPPED(fsrv->child_status)) { fsrv->child_pid = -1; }
++  if (!WIFSTOPPED(fsrv->child_status)) {
++
++    if (fsrv->child_pid > 0) { fsrv->last_child_pid = fsrv->child_pid; }
++    fsrv->child_pid = -1;
++
++  }
+ 
+ #ifdef __linux__
+ classify_result:
+@@ -2906,6 +2970,11 @@ store_persistent_record: {
+         ck_write(fd, data, len, fn);
+         close(fd);
+ 
++        fprintf(stderr,
++                "[RECORD] child pid: %d, result: %s, status:  %d, file: %s\n",
++                fsrv->last_child_pid, afl_fsrv_run_result_name(fsrv, retval),
++                fsrv->child_status, fn);
++
+       }
+ 
+     }
+diff --git a/src/afl-fuzz-bitmap.c b/src/afl-fuzz-bitmap.c
+index 031aff7e..cd1ab5a2 100644
+--- a/src/afl-fuzz-bitmap.c
++++ b/src/afl-fuzz-bitmap.c
+@@ -1079,6 +1079,12 @@ may_save_fault:
+     ck_write(fd, mem, len, fn);
+     close(fd);
+ 
++    fprintf(stderr,
++            "[RECORD] child pid: %d, result: %s, status:  %d, file: %s\n",
++            afl->fsrv.last_child_pid,
++            afl_fsrv_run_result_name(&afl->fsrv, fault),
++            afl->fsrv.child_status, fn);
++
+   }
+ 
+   if (unlikely(afl->infoexec) && fault == FSRV_RUN_CRASH) {

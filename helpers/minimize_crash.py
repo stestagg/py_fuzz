@@ -121,7 +121,15 @@ def main() -> None:
         print(f"error: not found: {path}", file=sys.stderr)
         sys.exit(1)
 
-    print(minimize(path))
+    result = minimize(path)
+    print(result)
+
+    min_path = path.with_suffix(".min.py")
+    try:
+        min_path.write_text(result)
+        print(f"wrote minimized script to {min_path}", file=sys.stderr)
+    except OSError as e:
+        print(f"warning: could not write {min_path}: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

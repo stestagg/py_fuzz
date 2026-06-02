@@ -1,10 +1,16 @@
 import asyncio
 import json
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Mapping
 
 import odhash
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mK]")
+_RECORD_RE = re.compile(
+    r"\[RECORD\] child pid:\s*(\d+), result:\s*(\S+), status:\s*(\d+), file:\s*(.+)$"
+)
 
 from .project import Project
 
@@ -138,6 +144,58 @@ def _iter_sources(project: Project):
                         yield f, ArtifactType.CRASH
 
 
+def _iter_record_lines(logs_dir: Path):
+    if not logs_dir.exists():
+        return
+    for worker_dir in logs_dir.iterdir():
+        if not worker_dir.is_dir():
+            continue
+        stdout_log = worker_dir / "stdout.log"
+        if not stdout_log.exists():
+            continue
+        try:
+            with open(stdout_log, errors="replace") as f:
+                for line in f:
+                    clean = _ANSI_RE.sub("", line)
+                    m = _RECORD_RE.search(clean)
+                    if m:
+                        yield {
+                            "pid": int(m.group(1)),
+                            "result": m.group(2),
+                            "status": int(m.group(3)),
+                            "file": m.group(4).strip(),
+                        }
+        except OSError:
+            continue
+
+
+def _enrich_from_logs(project: Project, artifacts_root: Path) -> int:
+    logs_dir = project.path("logs")
+    updated = 0
+    for record in _iter_record_lines(logs_dir):
+        vm_path = record["file"]
+        if not vm_path.startswith("/pfm/"):
+            continue
+        rel = vm_path[len("/pfm/"):]
+        artifact_dir = artifacts_root / odhash.hash(rel)
+        if not artifact_dir.exists():
+            continue
+        meta_path = artifact_dir / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        changed = False
+        for key, val in (("pid", record["pid"]), ("result", record["result"]), ("status", record["status"])):
+            if meta.get(key) != val:
+                meta[key] = val
+                changed = True
+        if changed:
+            meta_path.write_text(json.dumps(meta, indent=2))
+            updated += 1
+    return updated
+
+
 def _parse_core_name(name: str) -> tuple[int | None, int | None]:
     # core.<pid>.<timestamp>
     parts = name.split(".")
@@ -169,14 +227,16 @@ def _create_artifact(artifact_dir: Path, source: Path, atype: ArtifactType) -> N
     (artifact_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
 
-async def sync_artifacts(project: Project, concurrency: int = 64) -> int:
-    """Create artifact dirs for any new sources. Returns count of newly created artifacts."""
+async def sync_artifacts(project: Project, concurrency: int = 64) -> tuple[int, int]:
+    """Create artifact dirs for any new sources and enrich with log metadata.
+
+    Returns (new_artifact_count, enriched_meta_count).
+    """
     artifacts_root = project.path("artifacts")
     artifacts_root.mkdir(exist_ok=True)
 
     project_root = project.path()
     sem = asyncio.Semaphore(concurrency)
-    new_count = 0
 
     async def process(source: Path, atype: ArtifactType) -> bool:
         rel = str(source.relative_to(project_root))
@@ -188,7 +248,9 @@ async def sync_artifacts(project: Project, concurrency: int = 64) -> int:
         return True
 
     results = await asyncio.gather(*[process(src, atype) for src, atype in _iter_sources(project)])
-    return sum(results)
+    new_count = sum(results)
+    enriched = await asyncio.to_thread(_enrich_from_logs, project, artifacts_root)
+    return new_count, enriched
 
 
 async def link_cores(project: Project) -> int:
