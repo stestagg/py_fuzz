@@ -27,6 +27,13 @@ cd "$CHECKOUT_ROOT"
 if [ -d /pfm/tactical-patches ]; then
     for _patch in /pfm/tactical-patches/*.diff /pfm/tactical-patches/*.patch; do
         [ -f "$_patch" ] || continue
+        _basename=$(basename "$_patch")
+        case ":${PY_FUZZ_SKIP_PATCHES}:" in
+            *":${_basename}:"*)
+                echo "Skipping tactical patch: $_patch"
+                continue
+                ;;
+        esac
         git apply "$_patch"
         echo "Applied tactical patch: $_patch"
     done

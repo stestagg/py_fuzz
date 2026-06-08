@@ -201,21 +201,22 @@ private final class LinuxVirtRunner: @unchecked Sendable {
         let hvc1 = VZVirtioConsoleDeviceSerialPortConfiguration()
         let nullRead = FileHandle(forReadingAtPath: "/dev/null")!
 
-        // hvc0 write side: boot/kernel console output.
-        let hvc0WriteHandle: FileHandle
+        // hvc0 write side: boot/kernel console output + PFM_CMD_STATUS exit signal.
+        // Always route through a relay pipe so we can intercept the exit code line.
+        let hvc0Pipe = Pipe()
+        let hvc0WriteHandle = hvc0Pipe.fileHandleForWriting
         if let dmesgPath = options.dmesgPath {
             FileManager.default.createFile(atPath: dmesgPath, contents: nil)
+            let finalHandle: FileHandle
             if let dmesgHandle = FileHandle(forWritingAtPath: dmesgPath) {
-                hvc0WriteHandle = dmesgHandle
+                finalHandle = dmesgHandle
             } else {
                 writeStderr("Warning: could not open dmesg path for writing: \(dmesgPath)\n")
-                hvc0WriteHandle = FileHandle(forWritingAtPath: "/dev/null")!
+                finalHandle = FileHandle(forWritingAtPath: "/dev/null")!
             }
+            startHvc0Relay(from: hvc0Pipe.fileHandleForReading, dimOutput: false, finalHandle: finalHandle)
         } else {
-            // Relay boot/kernel noise to stdout with dim/grey ANSI codes.
-            let greyPipe = Pipe()
-            hvc0WriteHandle = greyPipe.fileHandleForWriting
-            startGreyRelay(from: greyPipe.fileHandleForReading)
+            startHvc0Relay(from: hvc0Pipe.fileHandleForReading, dimOutput: true, finalHandle: FileHandle.standardOutput)
         }
 
         // hvc0 read side: in interactive mode use a resize pipe so that SIGWINCH events
@@ -268,19 +269,48 @@ private final class LinuxVirtRunner: @unchecked Sendable {
         }
     }
 
-    private func startGreyRelay(from handle: FileHandle) {
-        let dim = "\u{1B}[2m".data(using: .utf8)!
-        let reset = "\u{1B}[0m".data(using: .utf8)!
-        let stdout = FileHandle.standardOutput
-        DispatchQueue.global(qos: .utility).async {
+    private func startHvc0Relay(from readHandle: FileHandle, dimOutput: Bool, finalHandle: FileHandle) {
+        let statusPrefix = Data("PFM_CMD_STATUS=".utf8)
+        let dim = dimOutput ? Data("\u{1B}[2m".utf8) : Data()
+        let reset = dimOutput ? Data("\u{1B}[0m".utf8) : Data()
+        var lineBuffer = Data()
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             while true {
-                let chunk = handle.availableData
+                let chunk = readHandle.availableData
                 if chunk.isEmpty { break }
-                var out = Data()
-                out.append(dim)
-                out.append(chunk)
-                out.append(reset)
-                stdout.write(out)
+                lineBuffer.append(chunk)
+
+                var outputLines = Data()
+                while let nlIdx = lineBuffer.firstIndex(of: UInt8(ascii: "\n")) {
+                    let lineData = lineBuffer[lineBuffer.startIndex..<nlIdx]
+                    lineBuffer.removeSubrange(lineBuffer.startIndex...nlIdx)
+
+                    if lineData.starts(with: statusPrefix) {
+                        if let codeStr = String(data: lineData.dropFirst(statusPrefix.count), encoding: .utf8),
+                           let code = Int32(codeStr.trimmingCharacters(in: .whitespaces)) {
+                            DispatchQueue.main.async { self?.exitCodeOnStop = code }
+                        }
+                    } else {
+                        outputLines.append(contentsOf: lineData)
+                        outputLines.append(UInt8(ascii: "\n"))
+                    }
+                }
+
+                if !outputLines.isEmpty {
+                    if dimOutput {
+                        var out = Data()
+                        out.append(dim)
+                        out.append(outputLines)
+                        out.append(reset)
+                        finalHandle.write(out)
+                    } else {
+                        finalHandle.write(outputLines)
+                    }
+                }
+            }
+            if !lineBuffer.isEmpty {
+                finalHandle.write(lineBuffer)
             }
         }
     }
@@ -319,7 +349,7 @@ private final class LinuxVirtRunner: @unchecked Sendable {
             "pfmscript=\(script)",
         ]
         if let envFile = options.envFile {
-            cmdlineParts.append("pfmenv=\(envFile)")
+            cmdlineParts.append("pfmsetup=\(envFile)")
         }
         if options.interactive {
             cmdlineParts.append("pfminteractive=1")

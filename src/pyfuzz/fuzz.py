@@ -1,6 +1,5 @@
 import asyncio
 import re
-import shlex
 import sys
 from pathlib import Path
 from .project import Project
@@ -58,6 +57,7 @@ def _log_worker_exit(worker_id: str, returncode: int, logs_dir: Path, outputs_di
         print(f"{tag} last lines of stderr.log:\n{_tail_log(stderr_log)}", file=sys.stderr)
 
 
+
 async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False):
     env = Env(project, image=Image.AFL)
 
@@ -88,9 +88,20 @@ async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False)
     cmdline.append(project.fuzz_target)
 
     core_dir = f"/pfm/cores/{worker_id}"
-    afl_cmd = shlex.join(str(p) for p in cmdline)
-    setup = f"mkdir -p {core_dir} && echo {core_dir}/core.%p > /proc/sys/kernel/core_pattern"
-    cmdline = ["sh", "-c", f"{setup} && {afl_cmd}"]
+    bpf_config = '/pfm/config/bpftrace.txt'
+    bpf_log = f'/pfm/logs/{worker_id}/bpf.txt'
+    env.setup_commands = [
+        "set -xe",
+        "ln -s /proc/self/fd /dev/fd",
+        "ln -s /proc/self/fd/0 /dev/stdin",
+        "ln -s /proc/self/fd/1 /dev/stdout",
+        "ln -s /proc/self/fd/2 /dev/stderr",
+        f"mkdir -p {core_dir}",
+        f"echo {core_dir}/core.%p > /proc/sys/kernel/core_pattern",
+        f"if [ -s {bpf_config} ]; then",
+        f"    bpftrace {bpf_config} > {bpf_log} 2>&1 &",
+        "fi",
+    ]
 
     if project.track_inputs:
         env['FUZZ_TRACK_INPUTS'] = f'/pfm/input_tracks/{worker_id}'

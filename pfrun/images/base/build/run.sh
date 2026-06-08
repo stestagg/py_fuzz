@@ -19,8 +19,8 @@ should_run() {
 }
 
 if should_run kernel "$@"; then
-    KERNEL_VERSION=6.18.22
-    wget -q "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz"
+    KERNEL_VERSION=7.0.11
+    wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KERNEL_VERSION}.tar.xz"
     tar xf "linux-${KERNEL_VERSION}.tar.xz"
     (
         cd "linux-${KERNEL_VERSION}"
@@ -61,21 +61,26 @@ EOF
         filesystem glibc gcc-libs busybox \
         python uv bzip2 gdbm libffi xz ncurses \
         openssl readline sqlite zlib zstd \
-        bpftrace linux-headers
+        bpftrace linux-headers pahole
 
     sudo rm -rf /fs/var/cache/pacman/pkg/*
     sudo rm -rf /fs/var/lib/pacman/sync/*
 
-    git clone --branch dev --depth 1 https://github.com/AFLplusplus/AFLplusplus.git
+    sudo mkdir -p /usr/src/afl
+    sudo chown builder:builder /usr/src/afl
+    git clone --branch dev --depth 1 https://github.com/AFLplusplus/AFLplusplus.git /usr/src/afl
     (
-        cd AFLplusplus
+        cd /usr/src/afl
         git log -n1
-        git apply /build/fut_debug.diff
         git apply /build/crash-pid-log.patch
         make PERFORMANCE=1 NO_PYTHON=1 NO_QEMU=1 AFL_NO_X86=1 NO_FRIDA=1 NO_UNICORN=1 \
             CC=clang CXX=clang++
         sudo make install DESTDIR=/fs PREFIX=/usr
+        make clean
     )
+    sudo mkdir -p /fs/usr/src
+    sudo cp -a /usr/src/afl /fs/usr/src/
+    sudo rm -rf /fs/usr/src/afl/.git
 
     sudo mkdir -p /fs/pfm
     sudo mkdir -p /fs/usr/local/bin

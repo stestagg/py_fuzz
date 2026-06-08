@@ -7,8 +7,10 @@
 #include <sys/stat.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define TEST_CRASH_INPUT     "fuzztestcrash"
 #define TEST_CRASH_INPUT_LEN 13
@@ -296,13 +298,33 @@ int main(int argc, char **argv) {
     int test_crash_mode = (getenv("FUZZ_TEST_CRASH") != NULL);
     const char *track_inputs_base = getenv("FUZZ_TRACK_INPUTS");
     int do_track_inputs = track_inputs_base != NULL;
+    int log_fd = -1, idx_fd = -1;
     if (do_track_inputs) {
-        printf("FUZZ_TRACK_INPUTS is set, fuzz inputs will be saved to subdirectories of: %s\n", track_inputs_base);
-        int mkdir_result = mkdir(track_inputs_base, 0755);
-        if (mkdir_result != 0 && errno != EEXIST) {
-            printf("FUZZ_TRACK_INPUTS is set but failed to create directory: %s\n", track_inputs_base);
+        /* Ensure the parent directory exists (track_inputs_base is e.g. /pfm/input_tracks/a01;
+         * the parent /pfm/input_tracks/ must exist before we create the .log/.idx files). */
+        char parent_dir[4096];
+        snprintf(parent_dir, sizeof(parent_dir), "%s", track_inputs_base);
+        char *last_slash = strrchr(parent_dir, '/');
+        if (last_slash && last_slash != parent_dir) {
+            *last_slash = '\0';
+            mkdir(parent_dir, 0755); /* ignore EEXIST */
+        }
+
+        char log_path[4096], idx_path[4096];
+        snprintf(log_path, sizeof(log_path), "%s.log", track_inputs_base);
+        snprintf(idx_path, sizeof(idx_path), "%s.idx", track_inputs_base);
+
+        log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd < 0) {
+            printf("FUZZ_TRACK_INPUTS: failed to open log: %s\n", log_path);
             abort();
         }
+        idx_fd = open(idx_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (idx_fd < 0) {
+            printf("FUZZ_TRACK_INPUTS: failed to open idx: %s\n", idx_path);
+            abort();
+        }
+        printf("FUZZ_TRACK_INPUTS: Tracking fuzz inputs in: %s\n", log_path);
     } else {
         printf("FUZZ_TRACK_INPUTS is not set, fuzz inputs will not be saved to disk.\n");
     }
@@ -314,18 +336,19 @@ int main(int argc, char **argv) {
     __AFL_INIT();
 #endif
 
-    FILE *track_fp = NULL;
+    uint32_t track_pid = 0;
     if (do_track_inputs) {
-        char track_path[4096];
-        pid_t pid = getpid();
-        snprintf(track_path, sizeof(track_path),
-                 "%s/%d.inputs", track_inputs_base, (int)pid);
-        track_fp = fopen(track_path, "wb");
-        if (!track_fp) {
-            printf("FUZZ_TRACK_INPUTS: failed to open: %s\n", track_path);
-            abort();
-        }
-        printf("FUZZ_TRACK_INPUTS: Tracking fuzz inputs in: %s\n", track_path);
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        uint64_t ts_us = (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+        track_pid = (uint32_t)getpid();
+        uint64_t log_off = (uint64_t)lseek(log_fd, 0, SEEK_END);
+
+        unsigned char idx_buf[20];
+        memcpy(idx_buf + 0,  &track_pid, 4);
+        memcpy(idx_buf + 4,  &ts_us,     8);
+        memcpy(idx_buf + 12, &log_off,   8);
+        write(idx_fd, idx_buf, 20);
     }
 
     unsigned char *buf = __AFL_FUZZ_TESTCASE_BUF;
@@ -345,16 +368,23 @@ int main(int argc, char **argv) {
             abort();
         }
 
-        if (track_fp) {
-            uint32_t input_len = (uint32_t)len;
-            static const char null_pad[6] = {0};
-            fwrite(&input_len, sizeof(uint32_t), 1, track_fp);
-            fwrite("\n", 1, 1, track_fp);
-            fwrite(buf, 1, (size_t)len, track_fp);
-            fwrite("\n", 1, 1, track_fp);
-            fwrite(null_pad, 1, 6, track_fp);
-            fwrite("\n", 1, 1, track_fp);
-            fflush(track_fp);
+        if (log_fd >= 0) {
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            uint64_t ts_us = (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+            uint16_t magic = 0xF00D;
+            uint16_t ilen  = (uint16_t)len;
+            size_t rec_len = 16 + (size_t)ilen;
+            unsigned char *rec = (unsigned char *)malloc(rec_len);
+            if (rec) {
+                memcpy(rec + 0,  &magic,      2);
+                memcpy(rec + 2,  &track_pid,  4);
+                memcpy(rec + 6,  &ts_us,      8);
+                memcpy(rec + 14, &ilen,        2);
+                memcpy(rec + 16, buf,          ilen);
+                write(log_fd, rec, rec_len);
+                free(rec);
+            }
         }
 
         /* Py_CompileString is NUL-terminated; inputs with embedded NULs would
@@ -414,8 +444,9 @@ int main(int argc, char **argv) {
         free(src);
     }
 
-    if (track_fp) {
-        fclose(track_fp);
+    if (log_fd >= 0) {
+        close(log_fd);
+        close(idx_fd);
     }
 
     return 0;

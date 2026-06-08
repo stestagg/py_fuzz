@@ -1,5 +1,11 @@
 ::sysinit:/usr/local/bin/mount -t proc proc /proc
 ::sysinit:/usr/local/bin/mount -t sysfs sys /sys
+::sysinit:/usr/local/bin/mkdir -p /sys/kernel/tracing
+::sysinit:/usr/local/bin/mkdir -p /sys/kernel/debug
+::sysinit:/usr/local/bin/mkdir -p /sys/fs/bpf
+::sysinit:/usr/local/bin/mount -t tracefs nodev /sys/kernel/tracing
+::sysinit:/usr/local/bin/mount -t debugfs nodev /sys/kernel/debug
+::sysinit:/usr/local/bin/mount -t bpf bpffs /sys/fs/bpf
 ::sysinit:/usr/local/bin/mount -t devtmpfs dev /dev
 ::sysinit:/usr/local/bin/mount -t tmpfs tmpfs /tmp -o nosuid,nodev
 ::sysinit:/usr/local/bin/mkdir -p /pfm

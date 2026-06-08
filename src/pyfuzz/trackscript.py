@@ -21,42 +21,61 @@ def _pid_and_worker_from_core_link(artifact_dir: Path) -> tuple[int | None, str 
     raise ValueError(f"Unexpected core link target format: {target} in artifact {artifact_dir}")
 
 
-def parse_inputs_file(path: Path) -> list[bytes]:
-    """Parse a .inputs file, returning raw bytes for each recorded input.
+_LOG_MAGIC = 0xF00D
+_LOG_HEADER = 16   # magic(2) + pid(4) + ts_us(8) + input_len(2)
+_IDX_RECORD = 20   # pid(4) + ts_us(8) + log_offset(8)
+
+
+def _idx_start_offset(log_path: Path, pid: int) -> int:
+    """Return the log offset for the first record of `pid` from the .idx file, or 0."""
+    idx_path = log_path.with_suffix('.idx')
+    if not idx_path.exists():
+        return 0
+    data = idx_path.read_bytes()
+    n = len(data) // _IDX_RECORD
+    for i in range(n):
+        base = i * _IDX_RECORD
+        (entry_pid,) = struct.unpack_from('<I', data, base)
+        if entry_pid == pid:
+            (log_off,) = struct.unpack_from('<Q', data, base + 12)
+            return log_off
+    return 0
+
+
+def parse_inputs_file(path: Path, pid: int | None = None) -> list[bytes]:
+    """Parse a .log file, returning raw bytes for each recorded input.
 
     Record layout (written by fuzz_python.c):
-        u32 (LE)  – input length
-        '\\n'
-        <length bytes>
-        '\\n'
-        6 × 0x00
-        '\\n'
+        u16 LE  – magic 0xF00D
+        u32 LE  – pid
+        u64 LE  – timestamp_us
+        u16 LE  – input_len
+        <input_len bytes>
+
+    If `pid` is given, the .idx file is consulted for a seek hint and only
+    records matching that pid are returned.  Reads to EOF for correctness.
     """
-    data = path.read_bytes()
+    start = _idx_start_offset(path, pid) if pid is not None else 0
+
+    with path.open('rb') as f:
+        if start:
+            f.seek(start)
+        data = f.read()
+
     inputs = []
     offset = 0
-    while offset + 5 <= len(data):
-        (size,) = struct.unpack_from('<I', data, offset)
-        offset += 4
-        if data[offset] != ord('\n'):
+    while offset + _LOG_HEADER <= len(data):
+        (magic,) = struct.unpack_from('<H', data, offset)
+        if magic != _LOG_MAGIC:
             break
-        offset += 1
-        end = offset + size
+        (rec_pid,) = struct.unpack_from('<I', data, offset + 2)
+        (input_len,) = struct.unpack_from('<H', data, offset + 14)
+        end = offset + _LOG_HEADER + input_len
         if end > len(data):
             break
-        raw = data[offset:end]
+        if pid is None or rec_pid == pid:
+            inputs.append(data[offset + _LOG_HEADER:end])
         offset = end
-        # expect '\n' + 6 nulls + '\n'
-        if offset + 8 > len(data):
-            break
-        if data[offset] != ord('\n'):
-            break
-        offset += 1
-        offset += 6
-        if data[offset] != ord('\n'):
-            break
-        offset += 1
-        inputs.append(raw)
     return inputs
 
 
@@ -83,7 +102,7 @@ def generate_all_track_scripts(project: Project, base: str) -> list[tuple[Path, 
         pid, worker_id = _pid_and_worker_from_core_link(core.dir)
         if pid is None:
             raise ValueError(f"Could not determine PID from core link in artifact {core}")
-        inputs_path = project.path("input_tracks", worker_id, f"{pid}.inputs")
+        inputs_path = project.path("input_tracks", f"{worker_id}.log")
         if not inputs_path.exists():
             print(f"Warning: Input track not found for core artifact {core}: {inputs_path}")
             continue
@@ -92,19 +111,19 @@ def generate_all_track_scripts(project: Project, base: str) -> list[tuple[Path, 
         if out_path.exists():
             results.append((out_path, False))
             continue
-        script = build_track_script(inputs_path, worker_id=worker_id)
+        script = build_track_script(inputs_path, worker_id=worker_id, pid=pid)
         out_path.write_text(script)
         results.append((out_path, True))
 
     return results
 
 
-def build_track_script(inputs_path: Path, worker_id: str = "") -> str:
-    """Build a self-contained Python reproducer script from a .inputs file."""
+def build_track_script(inputs_path: Path, worker_id: str = "", pid: int | None = None) -> str:
+    """Build a self-contained Python reproducer script from a .log file."""
     if not inputs_path.exists():
         raise FileNotFoundError(f"Track file not found: {inputs_path}")
 
-    inputs = parse_inputs_file(inputs_path)
+    inputs = parse_inputs_file(inputs_path, pid=pid)
     if not inputs:
         raise FileNotFoundError(f"No inputs found in {inputs_path}")
 

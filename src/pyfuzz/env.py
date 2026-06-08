@@ -77,6 +77,7 @@ class Env:
         self.image = image
         self.runner = runner
         self.vars = load_image_vars(self)
+        self.setup_commands: list[str] = []
 
     def __setitem__(self, key, value):
         self.vars[key] = value
@@ -95,7 +96,12 @@ class Env:
     def shell_export(self) -> str:
         lines = [f'export {e}={v}' for e, v in self.vars.items()]
         return "\n".join(lines)
-    
+
+    @property
+    def setup_script_lines(self) -> list[str]:
+        export_lines = [f'export {e}={v}' for e, v in self.vars.items()]
+        return export_lines + self.setup_commands
+
     @property
     def mounts(self):
         mounts = []

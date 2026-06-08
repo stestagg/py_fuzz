@@ -196,26 +196,25 @@ def _enrich_from_logs(project: Project, artifacts_root: Path) -> int:
     return updated
 
 
-def _parse_core_name(name: str) -> tuple[int | None, int | None]:
-    # core.<pid>.<timestamp>
+def _parse_core_pid(name: str) -> int | None:
+    # core.<pid>
     parts = name.split(".")
-    if len(parts) == 3 and parts[0] == "core":
+    if len(parts) == 2 and parts[0] == "core":
         try:
-            return int(parts[1]), int(parts[2])
+            return int(parts[1])
         except ValueError:
             pass
-    return None, None
+    return None
 
 
 def _create_artifact(artifact_dir: Path, source: Path, atype: ArtifactType) -> None:
     artifact_dir.mkdir(exist_ok=True)
     meta: dict = {"type": atype.value}
     if atype == ArtifactType.CORE:
-        pid, timestamp = _parse_core_name(source.name)
+        pid = _parse_core_pid(source.name)
         if pid is not None:
             meta["pid"] = pid
-        if timestamp is not None:
-            meta["timestamp"] = timestamp
+        meta["worker"] = source.parent.name
         (artifact_dir / "core").symlink_to(source)
     elif atype == ArtifactType.CRASH:
         meta["timestamp"] = int(source.stat().st_ctime)
@@ -254,26 +253,23 @@ async def sync_artifacts(project: Project, concurrency: int = 64) -> tuple[int, 
 
 
 async def link_cores(project: Project) -> int:
-    """Link each unlinked core to its closest crash within ±1 second. Returns count of new links."""
+    """Link each unlinked core to its matching crash by pid and worker. Returns count of new links."""
     artifacts = await list_artifacts(project)
 
     cores = [
         a for a in artifacts
-        if a.type == ArtifactType.CORE and "timestamp" in a.meta and "linked_crash" not in a.meta
+        if a.type == ArtifactType.CORE and "pid" in a.meta and "worker" in a.meta and "linked_crash" not in a.meta
     ]
-    crashes = [a for a in artifacts if a.type == ArtifactType.CRASH and "timestamp" in a.meta]
+    crashes = [a for a in artifacts if a.type == ArtifactType.CRASH and "pid" in a.meta and "worker" in a.meta]
 
     linked = 0
     for core in cores:
-        core_ts = core.meta["timestamp"]
-        candidates = [
-            (abs(c.meta["timestamp"] - core_ts), c)
-            for c in crashes
-            if abs(c.meta["timestamp"] - core_ts) <= 1
-        ]
-        if not candidates:
+        crash = next(
+            (c for c in crashes if c.meta["pid"] == core.meta["pid"] and c.meta["worker"] == core.meta["worker"]),
+            None,
+        )
+        if crash is None:
             continue
-        _, crash = min(candidates, key=lambda x: x[0])
 
         core_meta = {**core.meta, "linked_crash": crash.hash}
         (core.dir / "meta.json").write_text(json.dumps(core_meta, indent=2))

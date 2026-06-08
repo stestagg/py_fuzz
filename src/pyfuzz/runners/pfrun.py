@@ -28,24 +28,22 @@ async def pf_run(
     ncpu = ncpu or env.project.ncpu
     vm_mem = vm_mem or env.project.vm_mem
 
-    export_script = env.shell_export
-
     cmd_str = shlex.join(str(part) for part in cmd)
 
-    env_key = [cmd_str] + env.shell_sets
-    env_hash = odhash.hash(".".join(env_key))
-    
-    (env.project.path("envs") / f'{env_hash}.env').write_text(export_script + "\n")
+    script_content = "\n".join(env.setup_script_lines)
+    script_hash = odhash.hash(script_content)
+    (env.project.path("envs") / f'{script_hash}.sh').write_text(script_content + "\n")
+    setup_file = f"/pfm/envs/{script_hash}.sh"
 
-    env_file = f"/pfm/envs/{env_hash}.env"
+    print(f"Setup script: {setup_file}")
 
     pf_cmd = [
         str(PFRUN_BINARY),
         f'--imagedir', image_dir,
         f'--ncpu', str(ncpu),
         f'--mem', str(vm_mem),
+        f'--env-file', setup_file,
         f'--cmd', cmd_str,
-        f'--env-file', env_file,
     ]
     if vm_timeout is not None:
         pf_cmd.extend([f'--timeout', str(vm_timeout)])
@@ -64,6 +62,7 @@ async def pf_run(
         pf_cmd.append('--interactive')
 
     pipe_val = None if console else subprocess.PIPE 
+    capture_output = not console
 
     print(f'Running command in pfrun: {cmd_str}')
 

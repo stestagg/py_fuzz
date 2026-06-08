@@ -1,7 +1,9 @@
 import asyncio
+import json
 
 from .project import Project
 from .env import Env, Image
+from .paths import root_path
 
 
 async def _git(*args, cwd=None):
@@ -25,24 +27,46 @@ async def ensure_cpython_checkout(project: Project):
         await _git("checkout", "FETCH_HEAD", cwd=cpython_dir)
 
 
+async def _build_run(env, script):
+    proc = await env.run([script], console=True, vm_mem=8192)
+    await proc.wait()
+    if proc.returncode != 0:
+        stderr = (await proc.stderr.read()).decode() if proc.stderr else "<no stderr>"
+        stdout = (await proc.stdout.read()).decode() if proc.stdout else "<no stdout>"
+        raise RuntimeError(f"Build script {script} failed with return code {proc.returncode}\nStderr:\n{stderr}\nStdout:\n{stdout}")
+
+
 async def build_python(project: Project):
     await ensure_cpython_checkout(project)
     env = Env(project, image=Image.BUILD)
-    proc = await env.run(["/pfm/build_scripts/build.sh"], console=True, vm_mem=8192)
-    await proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Python build failed with return code {proc.returncode}")
+
+    patches_dir = root_path("tactical-patches")
+    patches_json_path = project.path("config", "patches.json")
+
+    existing = {}
+    if patches_json_path.exists():
+        existing = json.loads(patches_json_path.read_text())
+
+    all_patches = sorted(
+        p.name for p in patches_dir.iterdir()
+        if p.suffix in (".diff", ".patch")
+    )
+
+    skip_patches = [name for name in all_patches if existing.get(name) == "no"]
+    env["PY_FUZZ_SKIP_PATCHES"] = ":".join(skip_patches)
+
+    await _build_run(env, "/pfm/build_scripts/build.sh")
     # pfrun always exits 0; verify the expected output actually exists
     if not any(project.path("py").glob("bin/python3*-config")):
         raise RuntimeError("Python build failed: python3-config not found in py/bin/")
 
+    updated = {name: existing.get(name, "yes") for name in all_patches}
+    patches_json_path.write_text(json.dumps(updated, indent=2, sort_keys=True) + "\n")
+
 
 async def build_helpers(project: Project):
     env = Env(project, image=Image.BUILD)
-    proc = await env.run(["/pfm/build_scripts/build_helpers.sh"], console=True, vm_mem=8192)
-    await proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Helper build failed with return code {proc.returncode}")
+    await _build_run(env, "/pfm/build_scripts/build_helpers.sh")
     # pfrun always exits 0; verify at least one fuzz helper binary was produced
     tool_name = "fuzz_peg" if project.fuzz_peg else "fuzz_python"
     if not (project.path("tools") / tool_name).exists():

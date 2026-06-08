@@ -184,10 +184,10 @@ def tracks(ctx):
               help="Generate scripts for all cores, saving as scratch/reproducers/<BASE>-N.py")
 @click.pass_context
 def tracks_reproducer(ctx, worker_id, pid, out_path, base):
-    """Combine a .inputs track file into a reproducible Python script.
+    """Combine a .log track file into a reproducible Python script.
 
     With --all=BASE, scans all core artifacts, extracts the PID from each
-    lldb.txt, finds the matching .inputs file, and writes scratch/reproducers/<BASE>-N.py
+    lldb.txt, finds the matching .log file, and writes scratch/reproducers/<BASE>-N.py
     (skipping files that already exist).
     """
     from .trackscript import build_track_script, generate_all_track_scripts
@@ -210,8 +210,8 @@ def tracks_reproducer(ctx, worker_id, pid, out_path, base):
         raise click.UsageError(
             "Provide worker_id, pid, and out_path, or use --all=BASE"
         )
-    inputs_path = project.path("input_tracks") / worker_id / f"{pid}.inputs"
-    script = build_track_script(inputs_path, worker_id=worker_id)
+    inputs_path = project.path("input_tracks") / f"{worker_id}.log"
+    script = build_track_script(inputs_path, worker_id=worker_id, pid=int(pid))
     out = Path(out_path)
     out.write_text(script)
     line_count = script.count("\n")
@@ -221,7 +221,7 @@ def tracks_reproducer(ctx, worker_id, pid, out_path, base):
 @tracks.command("show")
 @click.argument("inputs_file", type=click.Path(exists=True, path_type=Path))
 def tracks_show(inputs_file):
-    """Parse a .inputs file and display each recorded input with a separator."""
+    """Parse a .log track file and display each recorded input with a separator."""
     from .trackscript import parse_inputs_file
 
     inputs = parse_inputs_file(inputs_file)
