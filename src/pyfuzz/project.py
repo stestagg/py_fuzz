@@ -15,16 +15,17 @@ class Project:
     asan: bool = False
     warmup_imports: str = ""
     created_at: str | None = None
-    vm_mem: int = 2048
+    vm_mem: int = 4096
     ncpu: int = 1
     fuzz_timeout_ms: int = 5000
-    fuzz_mem_limit: int = 512
-    fuzz_peg: bool = False
+    fuzz_mem_limit: int = 2048
+    harness: str = "fuzz_python"
     py_configure_extra_args: str = ""
-    py_debug: bool = False
+    py_debug: bool = True
     cmplog: bool = False
     fuzz_env: tuple[str] = ()
-    track_inputs: bool = False
+    track_inputs: bool = True
+    crash_on_memory_error: bool = False
 
     _name: str = None
 
@@ -60,7 +61,13 @@ class Project:
         if not config_path.exists():
             raise FileNotFoundError(f"No project.json found in project path: {root}")
         data = json.loads(config_path.read_text())
-        
+
+        # Migrate legacy configs that used the boolean fuzz_peg flag to the
+        # harness binary-name field.
+        if "fuzz_peg" in data:
+            fuzz_peg = data.pop("fuzz_peg")
+            data.setdefault("harness", "fuzz_peg" if fuzz_peg else "fuzz_python")
+
         project = cls(**data)
         project._name = name
         return project
@@ -87,7 +94,7 @@ class Project:
 
     @property
     def fuzz_target(self) -> str:
-        return "/pfm/tools/fuzz_peg" if self.fuzz_peg else "/pfm/tools/fuzz_python"
+        return f"/pfm/tools/{self.harness}"
     
     @property
     def actual_fuzz_mem_limit(self) -> int:

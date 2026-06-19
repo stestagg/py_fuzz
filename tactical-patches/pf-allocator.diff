@@ -1,0 +1,379 @@
+diff --git a/Include/cpython/pymem.h b/Include/cpython/pymem.h
+index 76b3221f7b9..28958260697 100644
+--- a/Include/cpython/pymem.h
++++ b/Include/cpython/pymem.h
+@@ -82,3 +82,18 @@ PyAPI_FUNC(void) PyMem_SetAllocator(PyMemAllocatorDomain domain,
+ 
+    The function does nothing if Python is not compiled is debug mode. */
+ PyAPI_FUNC(void) PyMem_SetupDebugHooks(void);
++
++/* Install a fault-injecting allocator hook with the ``Pf`` prefix on all
++   memory domains.  The hook preserves and delegates to the current allocator.
++   Installation and removal must be serialized with allocator changes. */
++PyAPI_FUNC(int) PyMem_PfInstall(void);
++PyAPI_FUNC(int) PyMem_PfUninstall(void);
++
++/* Set the number of memory-pressure-increasing allocation calls remaining and
++   an optional size filter.  A positive count is decremented for each
++   malloc/calloc or growing realloc whose size matches alloc_size (or for all
++   sizes when alloc_size is zero); the call which decrements count to zero
++   fails.  Zero count disables fault injection.  When a fault fires, alloc_size
++   is reset to zero. */
++PyAPI_FUNC(void) PyMem_PfSetCounter(Py_ssize_t count, size_t alloc_size);
++PyAPI_FUNC(Py_ssize_t) PyMem_PfGetCounter(void);
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+index 2b34b009fd7..e137d99a461 100644
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -563,6 +563,7 @@ OBJECT_OBJS=	\
+ 		Objects/namespaceobject.o \
+ 		Objects/object.o \
+ 		Objects/obmalloc.o \
++		Objects/pfalloc.o \
+ 		Objects/picklebufobject.o \
+ 		Objects/rangeobject.o \
+ 		Objects/sentinelobject.o \
+diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
+index 65a1fefe72e..4c2936789ca 100644
+--- a/Modules/Setup.bootstrap.in
++++ b/Modules/Setup.bootstrap.in
+@@ -31,6 +31,7 @@ _weakref _weakref.c
+ 
+ # commonly used core modules
+ _abc _abc.c
++pfalloc pfalloc.c
+ _functools _functoolsmodule.c
+ _locale _localemodule.c
+ _opcode _opcode.c
+diff --git a/Modules/_testcapi/mem.c b/Modules/_testcapi/mem.c
+index 7909476ac11..097ff89bf21 100644
+--- a/Modules/_testcapi/mem.c
++++ b/Modules/_testcapi/mem.c
+@@ -199,6 +199,72 @@ remove_mem_hooks(PyObject *self, PyObject *Py_UNUSED(ignored))
+     Py_RETURN_NONE;
+ }
+ 
++static PyObject *
++test_pymem_pf_allocator(PyObject *self, PyObject *Py_UNUSED(ignored))
++{
++    void *ptr = NULL;
++    void *new_ptr;
++    const char *error = NULL;
++
++    if (PyMem_PfInstall() < 0) {
++        return PyErr_Format(PyExc_RuntimeError, "failed to install Pf allocator");
++    }
++
++    PyMem_PfSetCounter(2, 0);
++    ptr = PyMem_RawMalloc(32);
++    if (ptr == NULL || PyMem_PfGetCounter() != 1) {
++        error = "first allocation did not decrement the counter";
++        goto done;
++    }
++    new_ptr = PyMem_RawMalloc(32);
++    if (new_ptr != NULL || PyMem_PfGetCounter() != 0) {
++        PyMem_RawFree(new_ptr);
++        error = "allocation reaching zero did not fail";
++        goto done;
++    }
++    new_ptr = PyMem_RawMalloc(32);
++    if (new_ptr == NULL) {
++        error = "allocation at zero did not delegate";
++        goto done;
++    }
++    PyMem_RawFree(new_ptr);
++
++    PyMem_PfSetCounter(2, 0);
++    new_ptr = PyMem_RawRealloc(ptr, 16);
++    if (new_ptr == NULL || PyMem_PfGetCounter() != 1) {
++        error = "realloc did not decrement the counter";
++        goto done;
++    }
++    ptr = new_ptr;
++    new_ptr = PyMem_RawRealloc(ptr, 64);
++    if (new_ptr != NULL || PyMem_PfGetCounter() != 0) {
++        if (new_ptr != NULL) {
++            ptr = new_ptr;
++        }
++        error = "realloc reaching zero did not fail";
++        goto done;
++    }
++
++    PyMem_PfSetCounter(1, 0);
++    new_ptr = PyMem_RawCalloc(2, 16);
++    if (new_ptr != NULL || PyMem_PfGetCounter() != 0) {
++        PyMem_RawFree(new_ptr);
++        error = "calloc reaching zero did not fail";
++        goto done;
++    }
++
++done:
++    PyMem_PfSetCounter(0, 0);
++    PyMem_RawFree(ptr);
++    if (PyMem_PfUninstall() < 0 && error == NULL) {
++        error = "failed to uninstall Pf allocator";
++    }
++    if (error != NULL) {
++        return PyErr_Format(PyExc_AssertionError, "%s", error);
++    }
++    Py_RETURN_NONE;
++}
++
+ static PyObject *
+ test_setallocators(PyMemAllocatorDomain domain)
+ {
+@@ -784,6 +850,7 @@ static PyMethodDef test_methods[] = {
+     {"set_nomemory",                  set_nomemory,                  METH_VARARGS,
+         PyDoc_STR("set_nomemory(start:int, stop:int = 0)")},
+     {"test_pymem_alloc0",             test_pymem_alloc0,             METH_NOARGS},
++    {"test_pymem_pf_allocator",       test_pymem_pf_allocator,       METH_NOARGS},
+     {"test_pymem_setallocators",      test_pymem_setallocators,      METH_NOARGS},
+     {"test_pymem_setrawallocators",   test_pymem_setrawallocators,   METH_NOARGS},
+     {"test_pyobject_new",             test_pyobject_new,             METH_NOARGS},
+diff --git a/Modules/pfalloc.c b/Modules/pfalloc.c
+new file mode 100644
+index 00000000000..0a450629cd6
+--- /dev/null
++++ b/Modules/pfalloc.c
+@@ -0,0 +1,71 @@
++/* Python module exposing the fault-injecting allocator hook. */
++
++#ifndef Py_BUILD_CORE_BUILTIN
++#  define Py_BUILD_CORE_MODULE 1
++#endif
++
++#include "Python.h"
++
++static PyObject *
++pfalloc_enable(PyObject *module, PyObject *args)
++{
++    PyMem_PfInstall();
++    Py_RETURN_NONE;
++}
++
++static PyObject *
++pfalloc_disable(PyObject *module, PyObject *args)
++{
++    if (PyMem_PfUninstall() < 0) {
++        PyErr_SetString(PyExc_RuntimeError,
++            "cannot uninstall pfalloc: another allocator hook is layered on top");
++        return NULL;
++    }
++    Py_RETURN_NONE;
++}
++
++static PyObject *
++pfalloc_set_counter(PyObject *module, PyObject *args)
++{
++    Py_ssize_t n;
++    Py_ssize_t alloc_size = 0;
++    if (!PyArg_ParseTuple(args, "n|n", &n, &alloc_size)) {
++        return NULL;
++    }
++    if (alloc_size < 0) {
++        alloc_size = 0;
++    }
++    PyMem_PfSetCounter(n, (size_t)alloc_size);
++    Py_RETURN_NONE;
++}
++
++static PyMethodDef pfalloc_methods[] = {
++    {"enable",      pfalloc_enable,      METH_NOARGS,
++     "Install the fault-injecting allocator hook."},
++    {"disable",     pfalloc_disable,     METH_NOARGS,
++     "Uninstall the fault-injecting allocator hook."},
++    {"set_counter", pfalloc_set_counter, METH_VARARGS,
++     "set_counter(n, alloc_size=0)\n"
++     "Set the allocation failure countdown.  The Nth allocation of alloc_size\n"
++     "bytes fails (0 means all sizes)."},
++    {NULL, NULL}
++};
++
++static PyModuleDef_Slot pfalloc_slots[] = {
++    _Py_ABI_SLOT,
++    {Py_mod_gil, Py_MOD_GIL_NOT_USED},
++    {0, NULL}
++};
++
++static struct PyModuleDef pfalloc_module = {
++    PyModuleDef_HEAD_INIT,
++    .m_name    = "pfalloc",
++    .m_methods = pfalloc_methods,
++    .m_slots   = pfalloc_slots,
++};
++
++PyMODINIT_FUNC
++PyInit_pfalloc(void)
++{
++    return PyModuleDef_Init(&pfalloc_module);
++}
+diff --git a/Objects/pfalloc.c b/Objects/pfalloc.c
+new file mode 100644
+index 00000000000..5ff9cf52340
+--- /dev/null
++++ b/Objects/pfalloc.c
+@@ -0,0 +1,164 @@
++/* Fault-injecting Python memory allocator wrapper. */
++
++#include "Python.h"
++
++#include <stdlib.h>
++
++
++typedef struct {
++    PyMemAllocatorEx wrapped;
++} PfAllocator;
++
++static struct {
++    int installed;
++    PfAllocator raw;
++    PfAllocator mem;
++    PfAllocator obj;
++} PfState;
++
++static Py_ssize_t PfCounter;
++static Py_ssize_t PfAllocSize;
++
++
++static volatile int PfFailedCount;
++
++Py_NO_INLINE void
++PyMem_PfFailed(void)
++{
++    /* Breakpoint target: set a debugger breakpoint here to catch injected failures. */
++    ++PfFailedCount;
++}
++
++static int
++PfShouldFail(size_t size)
++{
++    Py_ssize_t alloc_size = _Py_atomic_load_ssize(&PfAllocSize);
++    if (alloc_size != 0 && (Py_ssize_t)size != alloc_size) {
++        return 0;
++    }
++    Py_ssize_t counter = _Py_atomic_load_ssize(&PfCounter);
++    while (counter > 0) {
++        Py_ssize_t next = counter - 1;
++        if (_Py_atomic_compare_exchange_ssize(&PfCounter, &counter, next)) {
++            if (next == 0) {
++                _Py_atomic_store_ssize(&PfAllocSize, 0);
++                PyMem_PfFailed();
++                return 1;
++            }
++            return 0;
++        }
++    }
++    return 0;
++}
++
++static void *
++PfMalloc(void *ctx, size_t size)
++{
++    PfAllocator *allocator = ctx;
++    if (PfShouldFail(size)) {
++        return NULL;
++    }
++    return allocator->wrapped.malloc(allocator->wrapped.ctx, size);
++}
++
++static void *
++PfCalloc(void *ctx, size_t nelem, size_t elsize)
++{
++    PfAllocator *allocator = ctx;
++    if (PfShouldFail(nelem * elsize)) {
++        return NULL;
++    }
++    return allocator->wrapped.calloc(allocator->wrapped.ctx, nelem, elsize);
++}
++
++static void *
++PfRealloc(void *ctx, void *ptr, size_t new_size)
++{
++    PfAllocator *allocator = ctx;
++    if (PfShouldFail(new_size)) {
++        return NULL;
++    }
++    return allocator->wrapped.realloc(allocator->wrapped.ctx, ptr, new_size);
++}
++
++static void
++PfFree(void *ctx, void *ptr)
++{
++    PfAllocator *allocator = ctx;
++    allocator->wrapped.free(allocator->wrapped.ctx, ptr);
++}
++
++static void
++PfInstallDomain(PyMemAllocatorDomain domain, PfAllocator *allocator)
++{
++    PyMemAllocatorEx hook = {
++        .ctx = allocator,
++        .malloc = PfMalloc,
++        .calloc = PfCalloc,
++        .realloc = PfRealloc,
++        .free = PfFree,
++    };
++    PyMem_GetAllocator(domain, &allocator->wrapped);
++    PyMem_SetAllocator(domain, &hook);
++}
++
++int
++PyMem_PfInstall(void)
++{
++    if (PfState.installed) {
++        return 0;
++    }
++    PfInstallDomain(PYMEM_DOMAIN_RAW, &PfState.raw);
++    PfInstallDomain(PYMEM_DOMAIN_MEM, &PfState.mem);
++    PfInstallDomain(PYMEM_DOMAIN_OBJ, &PfState.obj);
++    PfState.installed = 1;
++    return 0;
++}
++
++static int
++PfDomainIsInstalled(PyMemAllocatorDomain domain, PfAllocator *allocator)
++{
++    PyMemAllocatorEx current;
++    PyMem_GetAllocator(domain, &current);
++    return (current.ctx == allocator &&
++            current.malloc == PfMalloc &&
++            current.calloc == PfCalloc &&
++            current.realloc == PfRealloc &&
++            current.free == PfFree);
++}
++
++int
++PyMem_PfUninstall(void)
++{
++    if (!PfState.installed) {
++        return 0;
++    }
++    if (!PfDomainIsInstalled(PYMEM_DOMAIN_RAW, &PfState.raw) ||
++        !PfDomainIsInstalled(PYMEM_DOMAIN_MEM, &PfState.mem) ||
++        !PfDomainIsInstalled(PYMEM_DOMAIN_OBJ, &PfState.obj)) {
++        return -1;
++    }
++
++    PyMem_SetAllocator(PYMEM_DOMAIN_RAW, &PfState.raw.wrapped);
++    PyMem_SetAllocator(PYMEM_DOMAIN_MEM, &PfState.mem.wrapped);
++    PyMem_SetAllocator(PYMEM_DOMAIN_OBJ, &PfState.obj.wrapped);
++    PfState.installed = 0;
++    PyMem_PfSetCounter(0, 0);
++    return 0;
++}
++
++void
++PyMem_PfSetCounter(Py_ssize_t count, size_t alloc_size)
++{
++    if (count < 0) {
++        count = 0;
++    }
++    _Py_atomic_store_ssize(&PfAllocSize, (Py_ssize_t)alloc_size);
++    _Py_atomic_store_ssize(&PfCounter, count);
++}
++
++Py_ssize_t
++PyMem_PfGetCounter(void)
++{
++    return _Py_atomic_load_ssize(&PfCounter);
++}

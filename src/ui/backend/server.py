@@ -6,36 +6,19 @@ import base64
 import hashlib
 import json
 import mimetypes
-import sys
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-PYTHON_SRC = REPO_ROOT / "src"
-if str(PYTHON_SRC) not in sys.path:
-    sys.path.insert(0, str(PYTHON_SRC))
-
-from pyfuzz.project import Project  # noqa: E402
-from pyfuzz.analysis import list_artifacts, sync_artifacts, get_artifact, Artifact  # noqa: E402
-from pyfuzz.summary import summarize_fuzzing  # noqa: E402
-from pyfuzz.lldb import analyze_core  # noqa: E402
-
+from common import REPO_ROOT, json_bytes, utc_now
+from handlers import collect_handlers
+from handlers.projects import dashboard_payload, list_projects, load_project
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DIST_DIR = REPO_ROOT / "src" / "ui" / "dist"
-GROUP_FILE_READ_LIMIT = 4096
-GROUP_LABEL_LIMIT = 100
 
-
-@dataclass(frozen=True)
-class ArtifactGroupSpec:
-    raw: str
-    kind: str
-    argument: str | None = None
+HANDLERS = collect_handlers()
 
 
 class HttpError(Exception):
@@ -43,255 +26,6 @@ class HttpError(Exception):
         self.status = status
         self.reason = reason
         super().__init__(f"{status} {reason}")
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def json_bytes(data: Any) -> bytes:
-    return json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
-def list_projects() -> list[str]:
-    return sorted(Project.projects())
-
-
-def load_project(name: str | None) -> Project | None:
-    if not name:
-        return None
-    return Project.load(name)
-
-
-def project_snapshot(project: Project) -> dict[str, Any]:
-    config = asdict(project)
-    config.pop("_name", None)
-    return {
-        "name": project.name,
-        "repo": project.repo,
-        "cloneRef": project.clone_ref,
-        "fuzzTarget": project.fuzz_target,
-        "config": config,
-        "importantConfig": {
-            "repo": project.repo,
-            "cloneRef": project.clone_ref,
-            "prId": project.pr_id,
-            "branch": project.branch,
-            "commit": project.commit,
-            "asan": project.asan,
-            "fuzzPeg": project.fuzz_peg,
-            "vmMem": project.vm_mem,
-            "ncpu": project.ncpu,
-            "fuzzTimeoutMs": project.fuzz_timeout_ms,
-            "fuzzMemLimit": project.fuzz_mem_limit,
-        },
-        "paths": {
-            "root": str(project.path()),
-            "config": str(project.config_path),
-        },
-    }
-
-
-def summary_payload(project: Project) -> dict[str, Any]:
-    try:
-        values = summarize_fuzzing(project)
-        return {
-            "status": "ready",
-            "updatedAt": utc_now(),
-            "values": values,
-            "error": None,
-        }
-    except Exception as exc:
-        return {
-            "status": "unavailable",
-            "updatedAt": utc_now(),
-            "values": {"project": project.name},
-            "error": str(exc),
-        }
-
-
-def validate_group_filename(filename: str, prefix: str) -> str:
-    if not filename:
-        raise ValueError(f"{prefix}: requires a filename")
-    path = Path(filename)
-    if path.is_absolute() or filename in (".", "..") or "/" in filename or "\\" in filename:
-        raise ValueError(f"{prefix}: filename must be local to the artifact directory")
-    return filename
-
-
-def parse_artifact_group_spec(raw: str) -> ArtifactGroupSpec:
-    spec = str(raw).strip()
-    if not spec:
-        raise ValueError("Grouping spec cannot be empty")
-    if spec == "type":
-        return ArtifactGroupSpec(raw=spec, kind="type")
-
-    key, sep, rest = spec.partition(":")
-    if not sep:
-        raise ValueError(f"Unknown grouping spec {spec!r}")
-    if key == "file":
-        return ArtifactGroupSpec(raw=spec, kind="file", argument=validate_group_filename(rest, "file"))
-    if key == "exists":
-        return ArtifactGroupSpec(raw=spec, kind="exists", argument=validate_group_filename(rest, "exists"))
-    if key == "meta":
-        if not rest:
-            raise ValueError("meta: requires a key")
-        return ArtifactGroupSpec(raw=spec, kind="meta", argument=rest)
-    raise ValueError(f"Unknown grouping spec {spec!r}")
-
-
-def parse_artifact_group_specs(raw_specs: Any) -> list[ArtifactGroupSpec]:
-    if raw_specs is None:
-        return []
-    if not isinstance(raw_specs, list):
-        raise ValueError("groupSpecs must be a list")
-    return [parse_artifact_group_spec(str(spec)) for spec in raw_specs]
-
-
-def group_label(value: str) -> str:
-    label = " ".join(value.split())
-    if not label:
-        label = "(empty)"
-    if len(label) > GROUP_LABEL_LIMIT:
-        label = label[: GROUP_LABEL_LIMIT - 3].rstrip() + "..."
-    return label
-
-
-def stringify_meta_value(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, sort_keys=True)
-
-
-def artifact_group_value(artifact: Artifact, spec: ArtifactGroupSpec) -> dict[str, str]:
-    if spec.kind == "type":
-        value = artifact.type.value
-        return {"value": value, "label": value}
-
-    argument = spec.argument or ""
-    if spec.kind == "meta":
-        if argument not in artifact.meta:
-            value = f"missing {argument}"
-        else:
-            value = stringify_meta_value(artifact.meta[argument])
-        return {"value": value, "label": group_label(value)}
-
-    path = artifact.dir / argument
-    if spec.kind == "exists":
-        value = f"has {argument}" if path.exists() else f"missing {argument}"
-        return {"value": value, "label": value}
-
-    if spec.kind == "file":
-        if not path.is_file():
-            value = f"missing {argument}"
-            return {"value": value, "label": value}
-        with path.open("rb") as handle:
-            value = handle.read(GROUP_FILE_READ_LIMIT).decode("utf-8", errors="replace")
-        return {"value": value, "label": group_label(value)}
-
-    raise ValueError(f"Unsupported grouping spec kind: {spec.kind}")
-
-
-def artifact_payload(artifact: Artifact, group_specs: list[ArtifactGroupSpec] | None = None) -> dict[str, Any]:
-    input_path = artifact.dir / "input.txt"
-    return {
-        "hash": artifact.hash,
-        "type": artifact.type.value,
-        "path": str(artifact.dir),
-        "hasInput": input_path.exists(),
-        "inputSize": input_path.stat().st_size if input_path.exists() else None,
-        "groupValues": [
-            artifact_group_value(artifact, spec)
-            for spec in (group_specs or [])
-        ],
-    }
-
-
-def read_artifact_files(artifact: Artifact, project: Project) -> list[dict[str, Any]]:
-    project_root = artifact.dir.parents[1].resolve()
-    files = []
-    for path in sorted(artifact.dir.iterdir()):
-        if path.name == "meta.json":
-            continue
-        if path.is_symlink():
-            resolved = (path.parent / path.readlink()).resolve()
-            try:
-                display_target = str(resolved.relative_to(project_root))
-            except ValueError:
-                display_target = str(path.readlink())
-            lldb_command = None
-            if path.name == "core":
-                core_rel = resolved.relative_to(project.path("cores"))
-                lldb_command = f"lldb -c /pfm/cores/{core_rel} {project.fuzz_target}"
-            files.append({
-                "name": path.name,
-                "symlink": display_target,
-                "preview": None,
-                "previewComplete": False,
-                "isBinary": False,
-                "lldbCommand": lldb_command,
-            })
-        elif path.suffix == ".txt":
-            text = path.read_text("utf-8", errors="replace")
-            lines = text.splitlines()
-            files.append({
-                "name": path.name,
-                "symlink": None,
-                "preview": "\n".join(lines[:10]),
-                "previewComplete": len(lines) <= 10,
-                "isBinary": False,
-            })
-        else:
-            try:
-                text = path.read_text("utf-8")
-                lines = text.splitlines()
-                files.append({
-                    "name": path.name,
-                    "symlink": None,
-                    "preview": "\n".join(lines[:10]),
-                    "previewComplete": len(lines) <= 10,
-                    "isBinary": False,
-                })
-            except (UnicodeDecodeError, IsADirectoryError):
-                files.append({
-                    "name": path.name,
-                    "symlink": None,
-                    "preview": None,
-                    "previewComplete": False,
-                    "isBinary": True,
-                })
-    return files
-
-
-def artifact_detail_payload(artifact: Artifact, project: Project) -> dict[str, Any]:
-    return {
-        "hash": artifact.hash,
-        "type": artifact.type.value,
-        "meta": artifact.meta,
-        "files": read_artifact_files(artifact, project),
-    }
-
-
-async def artifacts_payload(project: Project, group_specs: list[ArtifactGroupSpec] | None = None) -> dict[str, Any]:
-    artifacts = await list_artifacts(project)
-    return {
-        "artifacts": [
-            artifact_payload(artifact, group_specs)
-            for artifact in sorted(artifacts, key=lambda item: (item.type.value, item.hash))
-        ]
-    }
-
-
-def dashboard_payload(project: Project | None) -> dict[str, Any]:
-    if project is None:
-        return {
-            "selectedProject": None,
-            "summary": None,
-        }
-    return {
-        "selectedProject": project_snapshot(project),
-        "summary": summary_payload(project),
-    }
 
 
 def response_message(request_id: str | None, message_type: str, data: Any) -> dict[str, Any]:
@@ -312,14 +46,173 @@ def error_message(request_id: str | None, message_type: str, error: Exception) -
     }
 
 
+FINISHED_TASK_TTL = 60.0
+
+
+@dataclass
+class TrackedTask:
+    id: str
+    name: str
+    kind: str
+    project: str | None
+    started_at: str
+    status: str = "running"  # running | done | error | cancelled
+    error: str | None = None
+    finished_at: str | None = None
+    thread_backed: bool = False
+    exclusive_key: str | None = None
+    aio_task: asyncio.Task | None = None
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "project": self.project,
+            "startedAt": self.started_at,
+            "finishedAt": self.finished_at,
+            "status": self.status,
+            "error": self.error,
+            "stoppable": not self.thread_backed,
+        }
+
+
+class TaskManager:
+    def __init__(self) -> None:
+        self.tasks: dict[str, TrackedTask] = {}
+        self.sockets: set[DashboardSocket] = set()
+        self._counter = 0
+
+    def register(self, socket: DashboardSocket) -> None:
+        self.sockets.add(socket)
+
+    def unregister(self, socket: DashboardSocket) -> None:
+        self.sockets.discard(socket)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        return [task.payload() for task in self.tasks.values()]
+
+    def running(self, kind: str, project: str | None = None) -> list[TrackedTask]:
+        return [
+            task for task in self.tasks.values()
+            if task.status == "running" and task.kind == kind
+            and (project is None or task.project == project)
+        ]
+
+    async def broadcast(self) -> None:
+        message = {"type": "tasks:update", "data": {"tasks": self.snapshot()}}
+        for socket in list(self.sockets):
+            try:
+                await socket.send(message)
+            except Exception:
+                self.sockets.discard(socket)
+
+    def start(
+        self,
+        name: str,
+        kind: str,
+        project: str | None,
+        coro: Any,
+        *,
+        thread_backed: bool = False,
+        exclusive_key: str | None = None,
+    ) -> TrackedTask:
+        if exclusive_key:
+            for task in self.tasks.values():
+                if task.status == "running" and task.exclusive_key == exclusive_key:
+                    coro.close()
+                    raise ValueError(f"{task.name} is already running")
+        self._counter += 1
+        tracked = TrackedTask(
+            id=f"task-{self._counter}",
+            name=name,
+            kind=kind,
+            project=project,
+            started_at=utc_now(),
+            thread_backed=thread_backed,
+            exclusive_key=exclusive_key,
+        )
+        self.tasks[tracked.id] = tracked
+        tracked.aio_task = asyncio.create_task(coro, name=f"{tracked.id}:{name}")
+        tracked.aio_task.add_done_callback(lambda task: self._on_done(tracked, task))
+        asyncio.create_task(self.broadcast())
+        return tracked
+
+    def _on_done(self, tracked: TrackedTask, task: asyncio.Task) -> None:
+        # A done callback (not a wrapper coroutine) so cancel-before-first-run
+        # is handled too; statuses set by stop() (detached threads) win.
+        if task.cancelled():
+            if tracked.status == "running":
+                tracked.status = "cancelled"
+        elif task.exception() is not None:
+            if tracked.status == "running":
+                tracked.status = "error"
+                tracked.error = str(task.exception())
+        elif tracked.status == "running":
+            tracked.status = "done"
+        tracked.finished_at = utc_now()
+        asyncio.create_task(self._finalize(tracked))
+
+    async def _finalize(self, tracked: TrackedTask) -> None:
+        await self.broadcast()
+        await asyncio.sleep(FINISHED_TASK_TTL)
+        if self.tasks.get(tracked.id) is tracked:
+            del self.tasks[tracked.id]
+            await self.broadcast()
+
+    async def stop(self, task_id: str) -> dict[str, Any]:
+        tracked = self.tasks.get(task_id)
+        if tracked is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        if tracked.status != "running":
+            return {"stopped": False}
+        if tracked.thread_backed:
+            # Threads cannot be killed; mark cancelled and let it detach.
+            tracked.status = "cancelled"
+            await self.broadcast()
+            return {"stopped": True, "detached": True}
+        assert tracked.aio_task is not None
+        tracked.aio_task.cancel()
+        return {"stopped": True}
+
+    async def run_tracked(
+        self,
+        name: str,
+        kind: str,
+        project: str | None,
+        coro: Any,
+        *,
+        thread_backed: bool = False,
+        exclusive_key: str | None = None,
+    ) -> Any:
+        tracked = self.start(name, kind, project, coro, thread_backed=thread_backed, exclusive_key=exclusive_key)
+        assert tracked.aio_task is not None
+        # asyncio.wait (not a bare await) so cancelling this dispatch does not
+        # cancel the tracked task, and a stopped task surfaces as a plain error.
+        await asyncio.wait([tracked.aio_task])
+        if tracked.aio_task.cancelled():
+            raise ValueError("Task was stopped")
+        exc = tracked.aio_task.exception()
+        if exc is not None:
+            raise exc
+        return tracked.aio_task.result()
+
+
 class DashboardSocket:
-    def __init__(self, writer: asyncio.StreamWriter, initial_project: str | None):
+    def __init__(self, writer: asyncio.StreamWriter, initial_project: str | None, tasks: TaskManager):
         self.writer = writer
         self.project = load_project(initial_project)
+        self.tasks = tasks
+        self._send_lock = asyncio.Lock()
+
+    async def send_frame(self, payload: bytes, *, opcode: int) -> None:
+        # Serialize frame writes: concurrent dispatches would interleave bytes.
+        async with self._send_lock:
+            self.writer.write(encode_ws_frame(payload, opcode=opcode))
+            await self.writer.drain()
 
     async def send(self, data: Any) -> None:
-        self.writer.write(encode_ws_frame(json_bytes(data), opcode=0x1))
-        await self.writer.drain()
+        await self.send_frame(json_bytes(data), opcode=0x1)
 
     async def send_ready(self) -> None:
         await self.send(
@@ -327,6 +220,7 @@ class DashboardSocket:
                 "type": "connection:ready",
                 "data": {
                     "projects": list_projects(),
+                    "tasks": self.tasks.snapshot(),
                     **dashboard_payload(self.project),
                 },
             }
@@ -338,62 +232,18 @@ class DashboardSocket:
         try:
             data = await self.handle_message(message_type, message)
             await self.send(response_message(request_id, message_type, data))
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             await self.send(error_message(request_id, message_type, exc))
 
     async def handle_message(self, message_type: str, message: dict[str, Any]) -> Any:
-        if message_type == "projects:list":
-            return {"projects": list_projects()}
-
-        if message_type == "project:get":
-            return {
-                "projects": list_projects(),
-                **dashboard_payload(self.project),
-            }
-
-        if message_type == "project:select":
-            project_name = str(message.get("projectName") or "")
-            self.project = load_project(project_name)
-            return {
-                "projects": list_projects(),
-                **dashboard_payload(self.project),
-            }
-
-        if self.project is None:
+        handler = HANDLERS.get(message_type)
+        if handler is None:
+            raise ValueError(f"Unsupported message type: {message_type}")
+        if handler.requires_project and self.project is None:
             raise ValueError("No project selected")
-
-        if message_type == "summary:refresh":
-            return {"summary": await asyncio.to_thread(summary_payload, self.project)}
-
-        if message_type == "artifacts:list":
-            group_specs = parse_artifact_group_specs(message.get("groupSpecs", []))
-            return await artifacts_payload(self.project, group_specs)
-
-        if message_type == "artifacts:sync":
-            created = await sync_artifacts(self.project)
-            return {"created": created}
-
-        if message_type == "artifact:get":
-            artifact_hash = str(message.get("hash") or "")
-            artifact = get_artifact(self.project, artifact_hash)
-            return artifact_detail_payload(artifact, self.project)
-
-        if message_type == "artifact:run-lldb":
-            artifact_hash = str(message.get("hash") or "")
-            await analyze_core(self.project, artifact_hash)
-            artifact = get_artifact(self.project, artifact_hash)
-            return artifact_detail_payload(artifact, self.project)
-
-        if message_type == "artifact:file":
-            artifact_hash = str(message.get("hash") or "")
-            filename = str(message.get("filename") or "")
-            artifact = get_artifact(self.project, artifact_hash)
-            file_path = (artifact.dir / filename).resolve()
-            if not str(file_path).startswith(str(artifact.dir.resolve())):
-                raise ValueError("Invalid filename")
-            return {"content": file_path.read_text("utf-8", errors="replace")}
-
-        raise ValueError(f"Unsupported message type: {message_type}")
+        return await handler(self, message)
 
 
 async def read_http_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, str]]:
@@ -432,6 +282,7 @@ async def handle_websocket(
     target: str,
     headers: dict[str, str],
     cli_project: str | None,
+    task_manager: TaskManager,
 ) -> None:
     key = headers.get("sec-websocket-key")
     if not key:
@@ -451,24 +302,33 @@ async def handle_websocket(
     await writer.drain()
 
     query_project = parse_qs(urlparse(target).query).get("project", [None])[0]
-    socket = DashboardSocket(writer, query_project or cli_project)
+    socket = DashboardSocket(writer, query_project or cli_project, task_manager)
     await socket.send_ready()
+    task_manager.register(socket)
 
-    while not reader.at_eof():
-        opcode, payload = await read_ws_frame(reader)
-        if opcode == 0x8:
-            writer.write(encode_ws_frame(payload, opcode=0x8))
-            await writer.drain()
-            return
-        if opcode == 0x9:
-            writer.write(encode_ws_frame(payload, opcode=0xA))
-            await writer.drain()
-            continue
-        if opcode != 0x1:
-            continue
+    inflight: set[asyncio.Task] = set()
+    try:
+        while not reader.at_eof():
+            opcode, payload = await read_ws_frame(reader)
+            if opcode == 0x8:
+                await socket.send_frame(payload, opcode=0x8)
+                return
+            if opcode == 0x9:
+                await socket.send_frame(payload, opcode=0xA)
+                continue
+            if opcode != 0x1:
+                continue
 
-        message = json.loads(payload.decode("utf-8"))
-        await socket.dispatch(message)
+            message = json.loads(payload.decode("utf-8"))
+            dispatch_task = asyncio.create_task(socket.dispatch(message))
+            inflight.add(dispatch_task)
+            dispatch_task.add_done_callback(inflight.discard)
+    finally:
+        task_manager.unregister(socket)
+        for dispatch_task in inflight:
+            dispatch_task.cancel()
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
 
 
 async def read_ws_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
@@ -618,13 +478,14 @@ async def handle_client(
     *,
     port: int,
     cli_project: str | None,
+    task_manager: TaskManager,
 ) -> None:
     try:
         method, target, headers = await read_http_request(reader)
         if method != "GET":
             raise HttpError(405, "Method Not Allowed")
         if urlparse(target).path == "/ws":
-            await handle_websocket(reader, writer, target, headers, cli_project)
+            await handle_websocket(reader, writer, target, headers, cli_project, task_manager)
         else:
             await handle_http(writer, target, headers, port, cli_project)
     except HttpError as exc:
@@ -643,8 +504,9 @@ async def handle_client(
 
 
 async def run_server(host: str, port: int, project: str | None) -> None:
+    task_manager = TaskManager()
     server = await asyncio.start_server(
-        lambda reader, writer: handle_client(reader, writer, port=port, cli_project=project),
+        lambda reader, writer: handle_client(reader, writer, port=port, cli_project=project, task_manager=task_manager),
         host,
         port,
     )

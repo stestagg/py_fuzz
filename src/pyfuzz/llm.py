@@ -47,6 +47,22 @@ class LLMClassificationResult:
         self.error = error
 
 
+class LLMDescribeResult:
+    def __init__(
+        self,
+        artifact_hash: str,
+        dest: Path,
+        status: Literal["written", "skipped", "failed"],
+        text: str | None = None,
+        error: str | None = None,
+    ):
+        self.artifact_hash = artifact_hash
+        self.dest = dest
+        self.status = status
+        self.text = text
+        self.error = error
+
+
 def load_openai_api_key() -> str:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if api_key:
@@ -110,6 +126,34 @@ def validate_artifact_result_filename(dest: str) -> str:
     if dest in RESERVED_ARTIFACT_FILENAMES:
         raise LLMError(f"--dest may not overwrite artifact source file {dest!r}.")
     return dest
+
+
+async def _load_artifact_for_llm(
+    project: Project,
+    artifact_hash: str,
+    dest: str,
+    force: bool,
+    include_filenames: set[str] | None = None,
+) -> tuple[Path, str | None]:
+    """Returns (dest_path, artifact_view). artifact_view is None when the result should be skipped."""
+    artifact = get_artifact(project, artifact_hash)
+    dest_path = artifact.dir / dest
+    if dest_path.exists() and not force:
+        return dest_path, None
+    artifact_view = render_artifact_llm_view(
+        project,
+        artifact_hash,
+        require_lldb=True,
+        exclude_filenames={dest},
+        include_filenames=include_filenames,
+    )
+    return dest_path, artifact_view
+
+
+def _atomic_write(dest_path: Path, content: str) -> None:
+    tmp_path = dest_path.parent / f".{dest_path.name}.tmp-{os.getpid()}"
+    tmp_path.write_text(content)
+    tmp_path.replace(dest_path)
 
 
 def _classification_response_model(labels: list[str], include_rationale: bool) -> type[BaseModel]:
@@ -185,17 +229,10 @@ async def classify_artifact(
     force: bool = False,
     include_rationale: bool = False,
 ) -> LLMClassificationResult:
-    artifact = get_artifact(project, artifact_hash)
-    dest_path = artifact.dir / dest
-    if dest_path.exists() and not force:
+    dest_path, artifact_view = await _load_artifact_for_llm(project, artifact_hash, dest, force)
+    if artifact_view is None:
         return LLMClassificationResult(artifact_hash, dest_path, "skipped")
 
-    artifact_view = render_artifact_llm_view(
-        project,
-        artifact_hash,
-        require_lldb=True,
-        exclude_filenames={dest},
-    )
     response_model = _classification_response_model(labels, include_rationale)
     response = await client.responses.parse(
         model=model,
@@ -209,12 +246,10 @@ async def classify_artifact(
         raise LLMError(f"OpenAI classification for {artifact_hash} returned no parsed output.")
 
     payload = parsed.model_dump(mode="json")
-    tmp_path = artifact.dir / f".{dest}.tmp-{os.getpid()}"
     if include_rationale:
-        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        _atomic_write(dest_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     else:
-        tmp_path.write_text(str(payload["label"]) + "\n")
-    tmp_path.replace(dest_path)
+        _atomic_write(dest_path, str(payload["label"]) + "\n")
     return LLMClassificationResult(
         artifact_hash,
         dest_path,
@@ -255,6 +290,94 @@ async def classify_artifacts(
             except Exception as exc:
                 artifact_dir = project.path("artifacts", artifact_hash)
                 return LLMClassificationResult(
+                    artifact_hash,
+                    artifact_dir / dest,
+                    "failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+    return await asyncio.gather(*(run_one(hash) for hash in artifact_hashes))
+
+
+def _describe_prompt(artifact_view: str, prompt: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are analyzing crash artifacts produced by a CPython fuzzer. "
+                "Each artifact includes metadata about the crash, the input that triggered it, "
+                "LLDB debugger output, and optional additional analysis. "
+                "Be concise and focus on what the evidence actually shows."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{prompt}\n\nArtifact view:\n{artifact_view}",
+        },
+    ]
+
+
+async def describe_artifact(
+    client: AsyncOpenAI,
+    project: Project,
+    artifact_hash: str,
+    prompt: str,
+    dest: str,
+    model: str,
+    max_tokens: int = 50,
+    force: bool = False,
+    include_filenames: set[str] | None = None,
+) -> LLMDescribeResult:
+    dest_path, artifact_view = await _load_artifact_for_llm(
+        project,
+        artifact_hash,
+        dest,
+        force,
+        include_filenames=include_filenames,
+    )
+    if artifact_view is None:
+        return LLMDescribeResult(artifact_hash, dest_path, "skipped")
+
+    response = await client.responses.create(
+        model=model,
+        input=_describe_prompt(artifact_view, prompt),
+        max_output_tokens=max_tokens,
+    )
+    text = response.output_text.strip()
+    _atomic_write(dest_path, text + "\n")
+    return LLMDescribeResult(artifact_hash, dest_path, "written", text=text)
+
+
+async def describe_artifacts(
+    client: AsyncOpenAI,
+    project: Project,
+    artifact_hashes: list[str],
+    prompt: str,
+    dest: str,
+    model: str,
+    max_tokens: int = 50,
+    force: bool = False,
+    concurrency: int = CLASSIFY_CONCURRENCY,
+) -> list[LLMDescribeResult]:
+    dest = validate_artifact_result_filename(dest)
+    sem = asyncio.Semaphore(concurrency)
+
+    async def run_one(artifact_hash: str) -> LLMDescribeResult:
+        async with sem:
+            try:
+                return await describe_artifact(
+                    client,
+                    project,
+                    artifact_hash,
+                    prompt,
+                    dest,
+                    model,
+                    max_tokens=max_tokens,
+                    force=force,
+                )
+            except Exception as exc:
+                artifact_dir = project.path("artifacts", artifact_hash)
+                return LLMDescribeResult(
                     artifact_hash,
                     artifact_dir / dest,
                     "failed",

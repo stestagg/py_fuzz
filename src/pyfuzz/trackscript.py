@@ -79,8 +79,49 @@ def parse_inputs_file(path: Path, pid: int | None = None) -> list[bytes]:
     return inputs
 
 
+def get_pid_track_summary(path: Path, pid: int) -> tuple[int, bytes | None]:
+    """Return (count, last_input) for a pid, streaming the log without buffering all inputs."""
+    start = _idx_start_offset(path, pid)
+    count = 0
+    last_input: bytes | None = None
+    with path.open('rb') as f:
+        if start:
+            f.seek(start)
+        while True:
+            header = f.read(_LOG_HEADER)
+            if len(header) < _LOG_HEADER:
+                break
+            (magic,) = struct.unpack_from('<H', header, 0)
+            if magic != _LOG_MAGIC:
+                break
+            (rec_pid,) = struct.unpack_from('<I', header, 2)
+            (input_len,) = struct.unpack_from('<H', header, 14)
+            payload = f.read(input_len)
+            if len(payload) < input_len:
+                break
+            if rec_pid == pid:
+                count += 1
+                last_input = payload
+    return count, last_input
+
+
+def _pid_and_worker_for_artifact(artifact) -> tuple[int | None, str | None]:
+    """Resolve (pid, worker) for an artifact.
+
+    Cores derive these from the `core` symlink target; crashes read them from
+    the `pid`/`worker` meta values (pid is enriched from worker logs).
+    """
+    from .analysis import ArtifactType
+
+    if artifact.type == ArtifactType.CORE:
+        return _pid_and_worker_from_core_link(artifact.dir)
+    pid = artifact.meta.get("pid")
+    worker_id = artifact.meta.get("worker")
+    return pid, worker_id
+
+
 def generate_all_track_scripts(project: Project, base: str) -> list[tuple[Path, bool]]:
-    """Generate track scripts for all core artifacts with matching input tracks.
+    """Generate track scripts for all core and crash artifacts with matching input tracks.
 
     Returns list of (output_path, was_written) — was_written is False when
     the file already existed and was skipped.
@@ -89,22 +130,23 @@ def generate_all_track_scripts(project: Project, base: str) -> list[tuple[Path, 
     import asyncio
 
     artifacts = asyncio.run(list_artifacts(project))
-    cores = [a for a in artifacts if a.type == ArtifactType.CORE]
-    cores.sort(key=lambda a: a.meta.get("timestamp", 0))
+    artifacts = [a for a in artifacts if a.type in (ArtifactType.CORE, ArtifactType.CRASH)]
+    artifacts.sort(key=lambda a: a.meta.get("timestamp", 0))
 
     reproducers_dir = project.path("scratch", "reproducers")
     reproducers_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     num = 0
-    for core in cores:
-        print(f"Processing core artifact {core}")
-        pid, worker_id = _pid_and_worker_from_core_link(core.dir)
-        if pid is None:
-            raise ValueError(f"Could not determine PID from core link in artifact {core}")
+    for artifact in artifacts:
+        print(f"Processing {artifact.type.value} artifact {artifact}")
+        pid, worker_id = _pid_and_worker_for_artifact(artifact)
+        if pid is None or worker_id is None:
+            print(f"Warning: Could not determine pid/worker for artifact {artifact}, skipping")
+            continue
         inputs_path = project.path("input_tracks", f"{worker_id}.log")
         if not inputs_path.exists():
-            print(f"Warning: Input track not found for core artifact {core}: {inputs_path}")
+            print(f"Warning: Input track not found for artifact {artifact}: {inputs_path}")
             continue
         num += 1
         out_path = reproducers_dir / f"{base}-{num}.py"
@@ -134,7 +176,8 @@ def build_track_script(inputs_path: Path, worker_id: str = "", pid: int | None =
         "",
         f"# track-script: {label}  ({len(inputs)} inputs)",
         "",
-        "_base_modules = set(sys.modules)",
+        "_sysmodules = sys.modules",
+        "_base_modules = set(_sysmodules)",
         "",
     ]
 
@@ -147,16 +190,14 @@ def build_track_script(inputs_path: Path, worker_id: str = "", pid: int | None =
         lines.append(f"# FUZZ_MARKER: input_{name}")
         lines.append("try:")
         lines.append(f"    exec(compile({data!r}, '<input-{name}>', 'exec'))")
-        lines.append("except Exception as _e:")
-        lines.append(f"    print(f'input {name} failed: {{type(_e).__name__}}: {{_e}}', file=sys.stderr)")
-        lines.append("else:")
-        lines.append(f"    print(f'input {name} completed')")
+        lines.append("except:")
+        lines.append("    pass")
 
         if n % _MODULE_RESET_INTERVAL == 0:
             lines.append(f"# FUZZ_MARKER: reset_{name}")
-            lines.append("for _k in list(sys.modules):")
+            lines.append("for _k in list(_sysmodules):")
             lines.append("    if _k not in _base_modules:")
-            lines.append("        del sys.modules[_k]")
+            lines.append("        del _sysmodules[_k]")
 
         if n % _GC_INTERVAL == 0:
             lines.append(f"# FUZZ_MARKER: gc_{name}")

@@ -19,7 +19,7 @@ async def generate_test_cases_one(pr_number: int) -> list[str]:
     pr_data = load_pr(pr_number)
     pr_description = await describe_pr(pr_data)
     prompt = f"""
-Consider the following cpython Pull request carefully, and generate a list of around 10 fuzz inputs that will help
+Consider the following cpython Pull request carefully, and generate a list of around 5 fuzz inputs that will help
 guide a fuzzer to explore edge-cases, or potentially trigger crashes or other aborts in the interpreter.
 The inputs should cover as wide a variety of usage patterns as possible, and should be minimal, acting as seeds
 for the fuzzer rather than self-contained test cases.
@@ -40,7 +40,7 @@ Output the inputs sequentially, starting with <|start|>, separated by <|next|> a
 (input 2)
 <|next|>
 ...
-(input 10)
+(input 5)
 <|end|>
 """
 

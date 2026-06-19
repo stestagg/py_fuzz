@@ -3,7 +3,7 @@ import re
 import sys
 from pathlib import Path
 from .project import Project
-from .env import Env, Image
+from .env import Env, Image, terminate_on_cancel
 
 
 _CHUNK_SIZE = 1024 * 1024  # 1 MiB
@@ -112,11 +112,12 @@ async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False)
     proc = await env.run(cmdline, vm_mem=project.actual_vm_mem, ncpu=project.ncpu,
                          dmesg_path=logs_dir / "kernel.log")
 
-    await asyncio.gather(
-        _stream_to_file(proc.stdout, logs_dir / "stdout.log"),
-        _stream_to_file(proc.stderr, logs_dir / "stderr.log"),
-        proc.wait(),
-    )
+    async with terminate_on_cancel(proc):
+        await asyncio.gather(
+            _stream_to_file(proc.stdout, logs_dir / "stdout.log"),
+            _stream_to_file(proc.stderr, logs_dir / "stderr.log"),
+            proc.wait(),
+        )
     _log_worker_exit(worker_id, proc.returncode, logs_dir, project.path("outputs"))
     if proc.returncode != 0:
         raise RuntimeError(f"[{worker_id}] fuzz process exited with code {proc.returncode}")

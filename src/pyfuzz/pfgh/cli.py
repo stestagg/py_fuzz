@@ -30,8 +30,20 @@ def list(quiet, number, no, sort, asc):
     from .pr import load_prs
     df = load_prs()
     if sort:
+        import pandas as pd
+        # Columns whose values are ordinal labels rather than naturally
+        # sortable values. Listed low -> high so descending puts high first.
+        ordinal_orders = {
+            "risk_class": ["none", "low", "medium", "high"],
+        }
         sort_cols = [col.strip() for col in sort.split(",")]
-        df = df.sort_values(sort_cols, ascending=asc)
+        sort_df = df.copy()
+        for col in sort_cols:
+            if col in ordinal_orders and col in sort_df.columns:
+                sort_df[col] = pd.Categorical(
+                    sort_df[col], categories=ordinal_orders[col], ordered=True
+                )
+        df = df.loc[sort_df.sort_values(sort_cols, ascending=asc).index]
     if no:
         if no not in df.columns:
             print(f"WARNING: Column '{no}' not found in PR data, no filtering applied.")

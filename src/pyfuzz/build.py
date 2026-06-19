@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from .project import Project
-from .env import Env, Image
+from .env import Env, Image, terminate_on_cancel
 from .paths import root_path
 
 
@@ -29,7 +29,8 @@ async def ensure_cpython_checkout(project: Project):
 
 async def _build_run(env, script):
     proc = await env.run([script], console=True, vm_mem=8192)
-    await proc.wait()
+    async with terminate_on_cancel(proc):
+        await proc.wait()
     if proc.returncode != 0:
         stderr = (await proc.stderr.read()).decode() if proc.stderr else "<no stderr>"
         stdout = (await proc.stdout.read()).decode() if proc.stdout else "<no stdout>"
@@ -59,6 +60,8 @@ async def build_python(project: Project):
     # pfrun always exits 0; verify the expected output actually exists
     if not any(project.path("py").glob("bin/python3*-config")):
         raise RuntimeError("Python build failed: python3-config not found in py/bin/")
+    if not project.path("py", ".git-version-info").is_file():
+        raise RuntimeError("Python build failed: Git version metadata was not generated")
 
     updated = {name: existing.get(name, "yes") for name in all_patches}
     patches_json_path.write_text(json.dumps(updated, indent=2, sort_keys=True) + "\n")
@@ -68,6 +71,6 @@ async def build_helpers(project: Project):
     env = Env(project, image=Image.BUILD)
     await _build_run(env, "/pfm/build_scripts/build_helpers.sh")
     # pfrun always exits 0; verify at least one fuzz helper binary was produced
-    tool_name = "fuzz_peg" if project.fuzz_peg else "fuzz_python"
+    tool_name = project.harness
     if not (project.path("tools") / tool_name).exists():
         raise RuntimeError(f"Helper build failed: {tool_name} not found in tools/")

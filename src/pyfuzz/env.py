@@ -1,9 +1,34 @@
+import asyncio
+import contextlib
 from enum import Enum
 from .project import Project
 from . import runners
 from .paths import root_path
 import jinja2
 from functools import partial
+
+
+async def reap_process(proc, timeout: float = 10.0) -> None:
+    """Terminate a subprocess and wait for it to exit, escalating to kill."""
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+
+
+@contextlib.asynccontextmanager
+async def terminate_on_cancel(proc):
+    # Cancelling a coroutine that awaits a subprocess abandons the await but
+    # leaves the child (pfrun VM / docker container) running; reap it.
+    try:
+        yield proc
+    except asyncio.CancelledError:
+        await reap_process(proc)
+        raise
 
 
 class Runner(Enum):

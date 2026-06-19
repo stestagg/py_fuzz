@@ -1,0 +1,181 @@
+#!/bin/sh
+
+# Print enough build and host information to make a fuzzing result reproducible.
+# Keep this script dependency-light: it is intended to run in the /pfm images.
+
+LC_ALL=C
+export LC_ALL
+
+PYTHON=/pfm/py/bin/python3
+CPYTHON_REPO=/pfm/cpython
+GIT_INFO_FILE=${VERINFO_GIT_INFO_FILE:-/pfm/py/.git-version-info}
+
+human_bytes()
+{
+    awk -v bytes="$1" 'BEGIN {
+        split("B KiB MiB GiB TiB PiB", units, " ")
+        unit = 1
+        while (bytes >= 1024 && unit < 6) {
+            bytes /= 1024
+            unit++
+        }
+        if (unit == 1)
+            printf "%.0f %s", bytes, units[unit]
+        else
+            printf "%.2f %s", bytes, units[unit]
+    }'
+}
+
+first_line()
+{
+    awk 'NF { print; exit }'
+}
+
+write_git_info()
+{
+    repo=$1
+
+    printf 'repository: %s\n' "$repo"
+    printf 'commit: %s\n' "$(git -C "$repo" show -s --format='%H' HEAD)"
+    printf 'commit_short: %s\n' "$(git -C "$repo" show -s --format='%h' HEAD)"
+    printf 'tree: %s\n' "$(git -C "$repo" show -s --format='%T' HEAD)"
+    printf 'parents: %s\n' "$(git -C "$repo" show -s --format='%P' HEAD)"
+    printf 'author: %s\n' "$(git -C "$repo" show -s --format='%an <%ae>' HEAD)"
+    printf 'author_date: %s\n' "$(git -C "$repo" show -s --format='%aI' HEAD)"
+    printf 'committer: %s\n' "$(git -C "$repo" show -s --format='%cn <%ce>' HEAD)"
+    printf 'commit_date: %s\n' "$(git -C "$repo" show -s --format='%cI' HEAD)"
+    printf 'message: %s\n' "$(git -C "$repo" show -s --format='%B' HEAD | first_line)"
+    printf 'describe: %s\n' "$(git -C "$repo" describe --always --dirty --tags 2>/dev/null || git -C "$repo" rev-parse --short HEAD)"
+    printf 'branch: %s\n' "$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '%s' '(detached)')"
+    printf 'remote: %s\n' "$(git -C "$repo" config --get remote.origin.url 2>/dev/null || printf '%s' unavailable)"
+    if [ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        printf '%s\n' 'tracked_files_clean: no'
+        if command -v sha256sum >/dev/null 2>&1; then
+            printf 'tracked_diff_sha256: %s\n' "$(git -C "$repo" diff --binary HEAD | sha256sum | awk '{ print $1 }')"
+        elif command -v shasum >/dev/null 2>&1; then
+            printf 'tracked_diff_sha256: %s\n' "$(git -C "$repo" diff --binary HEAD | shasum -a 256 | awk '{ print $1 }')"
+        fi
+    else
+        printf '%s\n' 'tracked_files_clean: yes'
+    fi
+}
+
+# The build image has git and the CPython checkout; runtime images may have
+# neither.  This internal mode captures the information while it is available.
+if [ "$1" = "--write-git-info" ]; then
+    if [ "$#" -lt 2 ]; then
+        printf '%s\n' 'usage: verinfo --write-git-info OUTPUT [REPOSITORY]' >&2
+        exit 2
+    fi
+    output=$2
+    repo=${3:-$CPYTHON_REPO}
+    if ! command -v git >/dev/null 2>&1 || \
+            ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf 'verinfo: cannot read git repository %s\n' "$repo" >&2
+        exit 1
+    fi
+    output_tmp=${output}.tmp
+    write_git_info "$repo" > "$output_tmp"
+    mv "$output_tmp" "$output"
+    exit 0
+fi
+
+printf '%s\n' '===== VERINFO BEGIN ====='
+
+printf '%s\n' '[python]'
+printf 'command: %s -VV\n' "$PYTHON"
+if [ -x "$PYTHON" ]; then
+    "$PYTHON" -VV 2>&1
+else
+    printf 'version: unavailable (%s is not executable)\n' "$PYTHON"
+fi
+
+printf '\n%s\n' '[git]'
+git_repo=
+if [ -r "$GIT_INFO_FILE" ]; then
+    printf 'metadata_source: %s\n' "$GIT_INFO_FILE"
+    cat "$GIT_INFO_FILE"
+elif command -v git >/dev/null 2>&1; then
+    if git -C "$CPYTHON_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git_repo=$CPYTHON_REPO
+    elif git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git_repo=$(git rev-parse --show-toplevel 2>/dev/null)
+    fi
+    if [ -n "$git_repo" ]; then
+        printf '%s\n' 'metadata_source: live git checkout'
+        write_git_info "$git_repo"
+    else
+        printf '%s\n' 'repository: unavailable (no saved metadata or git checkout)'
+    fi
+else
+    printf '%s\n' 'repository: unavailable (no saved metadata or git executable)'
+fi
+
+printf '\n%s\n' '[system]'
+printf 'hostname: %s\n' "$(hostname 2>/dev/null || printf '%s' unavailable)"
+if [ -r /etc/os-release ]; then
+    os_name=$(awk -F= '$1 == "PRETTY_NAME" {
+        value = substr($0, index($0, "=") + 1)
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+    }' /etc/os-release)
+    printf 'operating_system: %s\n' "${os_name:-unavailable}"
+fi
+printf 'kernel: %s\n' "$(uname -sr 2>/dev/null || printf '%s' unavailable)"
+printf 'kernel_version: %s\n' "$(uname -v 2>/dev/null || printf '%s' unavailable)"
+printf 'architecture: %s\n' "$(uname -m 2>/dev/null || printf '%s' unavailable)"
+if command -v getconf >/dev/null 2>&1; then
+    printf 'word_size: %s-bit\n' "$(getconf LONG_BIT 2>/dev/null || printf '%s' unavailable)"
+    printf 'logical_cpus: %s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '%s' unavailable)"
+fi
+if [ -r /proc/cpuinfo ]; then
+    cpu_model=$(awk -F: '/^(model name|Hardware|Processor)[[:space:]]*:/ {
+        value = $2
+        sub(/^[[:space:]]+/, "", value)
+        if (value != "") {
+            print value
+            exit
+        }
+    }' /proc/cpuinfo)
+    printf 'cpu_model: %s\n' "${cpu_model:-unavailable}"
+fi
+
+libc_version=
+if command -v getconf >/dev/null 2>&1; then
+    libc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+fi
+if [ -z "$libc_version" ] && command -v ldd >/dev/null 2>&1; then
+    libc_version=$(ldd --version 2>&1 | first_line)
+fi
+printf 'libc: %s\n' "${libc_version:-unavailable}"
+
+if [ -r /proc/meminfo ]; then
+    memory_kib=$(awk '$1 == "MemTotal:" { print $2; exit }' /proc/meminfo)
+    if [ -n "$memory_kib" ]; then
+        memory_bytes=$(awk -v kib="$memory_kib" 'BEGIN { printf "%.0f", kib * 1024 }')
+        printf 'memory_total: %s\n' "$(human_bytes "$memory_bytes")"
+        printf 'memory_total_bytes: %s\n' "$memory_bytes"
+    fi
+fi
+
+cgroup_memory_limit=
+if [ -r /sys/fs/cgroup/memory.max ]; then
+    cgroup_memory_limit=$(sed -n '1p' /sys/fs/cgroup/memory.max)
+elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+    cgroup_memory_limit=$(sed -n '1p' /sys/fs/cgroup/memory/memory.limit_in_bytes)
+fi
+case "$cgroup_memory_limit" in
+    ''|max) ;;
+    *[!0-9]*) ;;
+    *)
+        printf 'cgroup_memory_limit: %s\n' "$(human_bytes "$cgroup_memory_limit")"
+        printf 'cgroup_memory_limit_bytes: %s\n' "$cgroup_memory_limit"
+        ;;
+esac
+
+if [ -r /proc/uptime ]; then
+    printf 'uptime_seconds: %s\n' "$(awk '{ printf "%.0f", $1 }' /proc/uptime)"
+fi
+
+printf '%s\n' '===== VERINFO END ====='

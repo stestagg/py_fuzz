@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 from .project import Project
-from .env import Env, Image
+from .env import Env, Image, terminate_on_cancel
 from .analysis import get_artifact, ArtifactType
 
 
@@ -10,7 +10,7 @@ async def analyze_core(project: Project, artifact_hash: str, interactive: bool =
     artifact = get_artifact(project, artifact_hash)
 
     env = Env(project, image=Image.LLDB)
-    target = "/pfm/tools/fuzz_python" if not project.fuzz_peg else "/pfm/tools/fuzz_peg"
+    target = f"/pfm/tools/{project.harness}"
 
     if interactive:
         if artifact.type == ArtifactType.CORE:
@@ -63,11 +63,12 @@ async def analyze_core(project: Project, artifact_hash: str, interactive: bool =
 
     proc = await env.run(cmdline, vm_mem=project.vm_mem, ncpu=1)
 
-    _, stderr_data, _ = await asyncio.gather(
-        proc.stdout.read(),
-        proc.stderr.read(),
-        proc.wait(),
-    )
+    async with terminate_on_cancel(proc):
+        _, stderr_data, _ = await asyncio.gather(
+            proc.stdout.read(),
+            proc.stderr.read(),
+            proc.wait(),
+        )
     if stderr_data:
         print(stderr_data.decode(errors="replace"), file=sys.stderr)
 
@@ -104,11 +105,12 @@ async def run_script_in_lldb(project: Project, script_path: Path, interactive: b
     cmdline += ["--output", f"/pfm/{output}"]
 
     proc = await env.run(cmdline, vm_mem=project.vm_mem, ncpu=1)
-    _, stderr_data, _ = await asyncio.gather(
-        proc.stdout.read(),
-        proc.stderr.read(),
-        proc.wait(),
-    )
+    async with terminate_on_cancel(proc):
+        _, stderr_data, _ = await asyncio.gather(
+            proc.stdout.read(),
+            proc.stderr.read(),
+            proc.wait(),
+        )
     if stderr_data:
         print(stderr_data.decode(errors="replace"), file=sys.stderr)
 
@@ -147,10 +149,11 @@ async def analyze_script_artifacts(project: Project, out_name: str, batch_file: 
             raise ValueError(f"Artifact {artifact_hash} has unsupported type {artifact.type}")
 
         proc = await env.run(cmdline, vm_mem=project.vm_mem, ncpu=1)
-        _, stderr_data, _ = await asyncio.gather(
-            proc.stdout.read(),
-            proc.stderr.read(),
-            proc.wait(),
-        )
+        async with terminate_on_cancel(proc):
+            _, stderr_data, _ = await asyncio.gather(
+                proc.stdout.read(),
+                proc.stderr.read(),
+                proc.wait(),
+            )
         if stderr_data:
             print(stderr_data.decode(errors="replace"), file=sys.stderr)

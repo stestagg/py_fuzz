@@ -64,5 +64,14 @@ async def preclassify_prs(pr_ids: list[int]) -> dict[int, int]:
     results = [r for r in results if r is not None]
 
     for pr_id, risk_score in results:
-        print(f"PR #{pr_id} risk score: {risk_score}")
+        if risk_score == 0:
+            risk_class = "none"
+        elif risk_score <= 3:
+            risk_class = "low"
+        elif risk_score <= 6:
+            risk_class = "medium"
+        else:
+            risk_class = "high"
+        print(f"PR #{pr_id} risk score: {risk_score} ({risk_class})")
         pr_add_value(pr_id, "risk_score", risk_score)
+        pr_add_value(pr_id, "risk_class", risk_class)

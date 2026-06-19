@@ -379,6 +379,90 @@ checks whether a script that was derived from fuzzing artifacts still fails
 against a more conventional CPython build, rather than only inside the fuzzing
 harness, LLDB image, or persistent AFL environment.
 
+## Allocation Fault Injection (`pfalloc`)
+
+The `pf-allocator.diff` tactical patch adds a `pfalloc` built-in module that
+wraps all three CPython allocator domains (`RAW`, `MEM`, `OBJ`) with a
+countdown-based fault injector. When installed in a patched build, it lets you
+make the Nth allocation of a given size fail on demand.
+
+### API
+
+```python
+import pfalloc
+
+pfalloc.enable()               # install the hook (idempotent)
+pfalloc.set_counter(n, size=0) # arm: Nth allocation of `size` bytes returns NULL
+                               # size=0 matches any allocation size
+pfalloc.disable()              # remove the hook (fails if another hook layered on top)
+```
+
+The counter decrements on every `malloc`, `calloc`, or growing `realloc` whose
+size matches the filter. The allocation that brings the counter to zero is the
+one that fails. After firing, `alloc_size` is reset to 0 so subsequent
+allocations pass through normally. Setting `n=0` disables fault injection
+without removing the hook.
+
+### Typical usage pattern
+
+```python
+import pfalloc
+
+pfalloc.enable()
+pfalloc.set_counter(3)          # third allocation of any size will fail
+result = some_operation()       # exercise the code path under test
+pfalloc.set_counter(0)          # disarm before disable
+pfalloc.disable()
+```
+
+To fault-inject inside `run-dist` or the LLDB shell, place the
+`import pfalloc` / `enable` / `set_counter` calls at the top of the reproducer
+script, immediately before the code under test.
+
+### Debugger breakpoint
+
+The C implementation contains a dedicated `Py_NO_INLINE` function
+`PyMem_PfFailed()` that is called exactly once per injected failure. Set an
+LLDB breakpoint on it to stop at the injection site:
+
+```
+(lldb) breakpoint set -n PyMem_PfFailed
+```
+
+This makes it straightforward to inspect the call stack at the moment of
+injection, confirm which allocator domain fired, and correlate the failure with
+Python object state.
+
+### Size filter
+
+`alloc_size` allows targeting a specific allocation size. This is useful when
+a code path of interest always allocates a fixed-size struct and you want to
+skip over unrelated heap traffic:
+
+```python
+pfalloc.set_counter(1, 56)   # fail the very first 56-byte allocation
+```
+
+When the fault fires, `alloc_size` is reset to 0 automatically so subsequent
+allocations of that size are not also blocked.
+
+### Combining with `run-dist`
+
+```sh
+./pfx run-dist projects/<project>/scratch/reproducers/alloc-repro.py
+```
+
+where `alloc-repro.py` imports and arms `pfalloc` at the top. `run-dist`
+builds a standard CPython from the patched tree, so the same reproducer that
+exercises allocation-failure paths inside the fuzzing image can be checked
+against a conventional release build.
+
+Relevance to reproduction: allocation failures expose error-handling paths that
+ordinary fuzzing rarely reaches. When a crash is suspected to involve a missing
+`NULL` check or a partially constructed object after a failed allocation,
+`pfalloc` lets you reproduce that failure at an exact, controllable point rather
+than relying on system memory pressure or fuzzer luck.
+
 ## `bisect SCRIPT`
 
 ```sh

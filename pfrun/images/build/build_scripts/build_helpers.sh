@@ -60,3 +60,14 @@ if [ $PF_BUILD_HELPER = "fuzz_peg" ]; then
         fi
     fi
 fi
+
+if [ $PF_BUILD_HELPER = "fuzz_script" ]; then
+    if [ ! -e /pfm/tools/fuzz_script ]; then
+        $CC -o /pfm/tools/fuzz_script $COMPILE_ARGS /pfm/helpers/fuzz_script.c $DEBUG_FLAG
+    fi
+    if [ $PY_FUZZ_CMPLOG = "1" ]; then
+        if [ ! -e /pfm/tools/fuzz_script.cmplog ]; then
+            env AFL_LLVM_CMPLOG=1 $CC -o /pfm/tools/fuzz_script.cmplog $COMPILE_ARGS_CMPLOG /pfm/helpers/fuzz_script.c $DEBUG_FLAG
+        fi
+    fi
+fi

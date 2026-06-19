@@ -181,13 +181,14 @@ def tracks(ctx):
 @click.argument("pid", required=False)
 @click.argument("out_path", type=click.Path(), required=False)
 @click.option("--all", "base", metavar="BASE", default=None,
-              help="Generate scripts for all cores, saving as scratch/reproducers/<BASE>-N.py")
+              help="Generate scripts for all cores and crashes, saving as scratch/reproducers/<BASE>-N.py")
 @click.pass_context
 def tracks_reproducer(ctx, worker_id, pid, out_path, base):
     """Combine a .log track file into a reproducible Python script.
 
-    With --all=BASE, scans all core artifacts, extracts the PID from each
-    lldb.txt, finds the matching .log file, and writes scratch/reproducers/<BASE>-N.py
+    With --all=BASE, scans all core and crash artifacts, resolves the pid/worker
+    for each (cores from the core symlink, crashes from their meta), finds the
+    matching .log file, and writes scratch/reproducers/<BASE>-N.py
     (skipping files that already exist).
     """
     from .trackscript import build_track_script, generate_all_track_scripts
@@ -348,6 +349,51 @@ def llm_classify(ctx, extra_text, classes_text, dest, force, rationale, artifact
         raise click.ClickException(f"{len(failures)} artifact classification(s) failed.")
 
 
+@llm.command("describe")
+@click.option("--prompt", "prompt_text", required=True, help="Prompt to send with each artifact.")
+@click.option("--dest", required=True, help="Filename in each artifact directory for the result.")
+@click.option("--force", is_flag=True, help="Overwrite an existing destination file.")
+@click.option("--max-tokens", default=50, show_default=True, help="Maximum output tokens.")
+@click.argument("artifact_hashes", nargs=-1, required=True)
+@click.pass_context
+def llm_describe(ctx, prompt_text, dest, force, max_tokens, artifact_hashes):
+    from .llm import LLMError, describe_artifacts
+
+    project = Project.load(ctx.obj["project"])
+
+    try:
+        results = asyncio.run(
+            describe_artifacts(
+                ctx.obj["openai_client"],
+                project,
+                list(artifact_hashes),
+                prompt_text,
+                dest,
+                ctx.obj["llm_model"],
+                max_tokens=max_tokens,
+                force=force,
+            )
+        )
+    except LLMError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    failures = []
+    for result in results:
+        if result.status == "written":
+            preview = (result.text or "")[:80]
+            if len(result.text or "") > 80:
+                preview += "..."
+            click.echo(f"{result.artifact_hash}: {preview} -> {result.dest.name}")
+        elif result.status == "skipped":
+            click.echo(f"{result.artifact_hash}: skipped ({result.dest.name} exists)")
+        else:
+            failures.append(result)
+            click.echo(f"{result.artifact_hash}: failed: {result.error}", err=True)
+
+    if failures:
+        raise click.ClickException(f"{len(failures)} artifact description(s) failed.")
+
+
 @cli.group("analyze")
 @click.pass_context
 def analyze(ctx):
@@ -402,6 +448,17 @@ def analyze_link_core(ctx):
     project = Project.load(ctx.obj["project"])
     count = asyncio.run(link_cores(project))
     click.echo(f"Linked {count} core(s) to crashes")
+
+
+@analyze.command("core")
+@click.argument("artifact_hash")
+@click.pass_context
+def analyze_core_cmd(ctx, artifact_hash):
+    """Run full analysis on a core artifact (LLDB, crash link, input tracking)."""
+    from .analysis import analyze_core_artifact
+    project = Project.load(ctx.obj["project"])
+    asyncio.run(analyze_core_artifact(project, artifact_hash))
+    click.echo(f"Analysis complete: artifacts/{artifact_hash}/")
 
 
 @analyze.command("query", cls=QueryCommand)
@@ -521,6 +578,39 @@ def edit_config(ctx):
     stripped = {k: v for k, v in data.items() if k not in defaults or v != defaults[k]}
     project.config_path.write_text(json.dumps(stripped, indent=2, sort_keys=True) + '\n')
     click.echo(f"Config saved for project '{project.name}'.")
+
+
+_FUZZ_SCRIPT_TEMPLATE = '''\
+# Fuzz driver for the `fuzz_script` harness.
+#
+# This script is compiled once and run on every fuzzing iteration. The raw
+# AFL-mutated input is available as `FUZZ_INPUT` (a `bytes` object).
+#
+# Set the project `harness` option to "fuzz_script" to use this.
+
+# Example: fuzz a decompressor.
+# import zlib
+# try:
+#     zlib.decompress(FUZZ_INPUT)
+# except zlib.error:
+#     pass
+'''
+
+
+@cli.command("edit-script")
+@click.pass_context
+def edit_script(ctx):
+    """Edit the fuzz_script harness script (config/fuzz_script.py) in $EDITOR."""
+    import subprocess
+
+    project = Project.load(ctx.obj["project"])
+    script_path = project.path("config", "fuzz_script.py")
+    if not script_path.exists():
+        script_path.write_text(_FUZZ_SCRIPT_TEMPLATE)
+
+    editor = os.environ.get('EDITOR', 'vi')
+    subprocess.run([editor, str(script_path)], check=True)
+    click.echo(f"Saved {script_path}")
 
 
 @cli.command("show-config")

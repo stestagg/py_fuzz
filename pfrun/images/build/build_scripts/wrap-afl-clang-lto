@@ -88,7 +88,7 @@ def prepare(cmd, args, env):
         print(f"\x1b[34mSTARTID={start_id}\x1b[0m", file=sys.stderr)
         return CAPTURE_EDGES
     
-    if output_file in {'python.exe', '/pfm/tools/fuzz_python', '/pfm/tools/fuzz_peg', '/pfm/tools/fuzz_python.cmplog', '/pfm/tools/fuzz_peg.cmplog'}:
+    if output_file in {'python.exe', '/pfm/tools/fuzz_python', '/pfm/tools/fuzz_peg', '/pfm/tools/fuzz_script', '/pfm/tools/fuzz_python.cmplog', '/pfm/tools/fuzz_peg.cmplog', '/pfm/tools/fuzz_script.cmplog'}:
         del env['AFL_LLVM_LTO_DONTWRITEID']
         env['AFL_LLVM_LTO_STARTID'] = str(start_id)
         print(f"\x1b[34mGENERATING EXECUTABLE STARTID={start_id}\x1b[0m", file=sys.stderr)

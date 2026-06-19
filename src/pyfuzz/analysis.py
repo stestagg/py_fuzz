@@ -306,12 +306,70 @@ def get_artifact(project: Project, hash: str) -> Artifact:
     return artifact
 
 
+ANALYZE_CORE_MARKER_FILE = "analyze-core.marker"
+ANALYZE_CORE_MARKER_VERSION = "v1"
+
+
+async def analyze_core_artifact(project: Project, artifact_hash: str) -> None:
+    """Run full analysis on a core artifact: LLDB, crash linking, input tracking.
+
+    Idempotent: skips all work if analyze-core.marker already contains the current version.
+    """
+    artifact = get_artifact(project, artifact_hash)
+    marker_path = artifact.dir / ANALYZE_CORE_MARKER_FILE
+
+    if marker_path.exists() and marker_path.read_text().strip() == ANALYZE_CORE_MARKER_VERSION:
+        return
+
+    if not (artifact.dir / "lldb.txt").exists():
+        from .lldb import analyze_core as _run_lldb
+        await _run_lldb(project, artifact_hash)
+        artifact._meta = None  # reload meta after lldb may enrich it
+
+    pid = artifact.meta.get("pid")
+    worker = artifact.meta.get("worker")
+
+    if pid is not None and worker is not None and "linked_crash" not in artifact.meta:
+        all_artifacts = await list_artifacts(project)
+        crash = next(
+            (a for a in all_artifacts
+             if a.type == ArtifactType.CRASH
+             and a.meta.get("pid") == pid
+             and a.meta.get("worker") == worker),
+            None,
+        )
+        if crash is not None:
+            core_meta = {**artifact.meta, "linked_crash": crash.hash}
+            (artifact.dir / "meta.json").write_text(json.dumps(core_meta, indent=2))
+            artifact._meta = core_meta
+
+            crash_meta = {**crash.meta, "linked_core": artifact_hash}
+            (crash.dir / "meta.json").write_text(json.dumps(crash_meta, indent=2))
+            crash._meta = crash_meta
+
+    if pid is not None and worker is not None:
+        from .trackscript import get_pid_track_summary
+        log_path = project.path("input_tracks") / f"{worker}.log"
+        if log_path.exists():
+            count, last_input = await asyncio.to_thread(get_pid_track_summary, log_path, pid)
+            if count > 0:
+                current_meta = json.loads((artifact.dir / "meta.json").read_text())
+                current_meta["inputs_run"] = count
+                (artifact.dir / "meta.json").write_text(json.dumps(current_meta, indent=2))
+                artifact._meta = None
+            if last_input is not None:
+                (artifact.dir / "last_input.txt").write_bytes(last_input)
+
+    marker_path.write_text(ANALYZE_CORE_MARKER_VERSION)
+
+
 def render_artifact_llm_view(
     project: Project,
     artifact_hash: str,
     require_lldb: bool = True,
     section_limits: Mapping[str, int] | None = None,
     exclude_filenames: set[str] | None = None,
+    include_filenames: set[str] | None = None,
 ) -> str:
     """Render an artifact as compact context suitable for an LLM prompt."""
     artifact = get_artifact(project, artifact_hash)
@@ -319,10 +377,63 @@ def render_artifact_llm_view(
     excluded = {"input.txt", "lldb.txt", *(exclude_filenames or set())}
     lldb_path = artifact.dir / "lldb.txt"
 
-    if require_lldb and not lldb_path.exists():
+    if require_lldb and (include_filenames is None or "lldb.txt" in include_filenames) and not lldb_path.exists():
         raise FileNotFoundError(
             f"Artifact {artifact_hash} has no lldb.txt; run analysis first."
         )
+
+    if include_filenames is not None:
+        sections = []
+        for filename in sorted(include_filenames):
+            path = artifact.dir / filename
+            if filename == "meta.json":
+                sections.append(
+                    _format_llm_section("Artifact Metadata", _llm_metadata(artifact), limits["metadata"])
+                )
+            elif filename == "input.txt" and path.is_file():
+                data = path.read_bytes()
+                sections.append(
+                    _format_llm_section(
+                        f"Crash Input (input.txt, {len(data):,} bytes)",
+                        _bytes_for_llm(data),
+                        limits["input"],
+                    )
+                )
+            elif filename == "lldb.txt" and path.is_file():
+                text = path.read_text(errors="replace")
+                sections.append(
+                    _format_llm_section(
+                        f"LLDB Analysis (lldb.txt, {len(text):,} chars)",
+                        text,
+                        limits["lldb"],
+                    )
+                )
+            elif path.is_symlink():
+                sections.append(
+                    _format_llm_section(
+                        f"Artifact File ({filename})",
+                        f"Symbolic link to {path.readlink()}",
+                        limits["analysis"],
+                    )
+                )
+            elif path.is_file():
+                data = path.read_bytes()
+                sections.append(
+                    _format_llm_section(
+                        f"Additional Analysis ({filename}, {len(data):,} bytes)",
+                        _bytes_for_llm(data),
+                        limits["analysis"],
+                    )
+                )
+            elif path.is_dir():
+                sections.append(
+                    _format_llm_section(
+                        f"Artifact Directory ({filename})",
+                        "Directory contents are not included.",
+                        limits["analysis"],
+                    )
+                )
+        return "\n\n".join(sections) + ("\n" if sections else "")
 
     sections = [
         _format_llm_section("Artifact Metadata", _llm_metadata(artifact), limits["metadata"]),

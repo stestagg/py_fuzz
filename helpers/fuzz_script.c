@@ -18,10 +18,17 @@
 __AFL_FUZZ_INIT();
 
 /*
+ * This harness differs from fuzz_python.c: instead of treating each AFL input
+ * as Python *source*, it runs a FIXED script (loaded from the FUZZ_SCRIPT env
+ * var, compiled once at startup) every iteration. The raw AFL input bytes are
+ * exposed to that script as a `bytes` object named FUZZ_INPUT. This is for
+ * fuzzing a specific API/codepath (e.g. a decompressor) rather than the
+ * compiler/parser itself.
+ *
  * Tuning knobs:
  *
- * - __AFL_LOOP(10000) keeps persistent mode fast, but state will accumulate
- *   inside CPython over time. Lower it when chasing heisenbugs.
+ * - __AFL_LOOP() keeps persistent mode fast, but state will accumulate inside
+ *   CPython over time. Lower it when chasing heisenbugs.
  *
  * - MODULE_CLEANUP_EVERY removes newly imported modules from sys.modules every
  *   N iterations. This reduces cross-iteration contamination without doing a
@@ -170,6 +177,48 @@ static PyObject *make_fresh_globals(void) {
     return globals;
 }
 
+/*
+ * Read the entire FUZZ_SCRIPT file into a freshly allocated, NUL-terminated
+ * buffer. Returns NULL on any error (after printing to stderr). Caller frees.
+ */
+static char *read_script_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "FUZZ_SCRIPT: cannot open '%s'\n", path);
+        return NULL;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "FUZZ_SCRIPT: cannot seek '%s'\n", path);
+        fclose(fp);
+        return NULL;
+    }
+    long size = ftell(fp);
+    if (size < 0) {
+        fprintf(stderr, "FUZZ_SCRIPT: cannot tell size of '%s'\n", path);
+        fclose(fp);
+        return NULL;
+    }
+    rewind(fp);
+
+    char *buf = (char *)malloc((size_t)size + 1);
+    if (!buf) {
+        fprintf(stderr, "FUZZ_SCRIPT: out of memory reading '%s'\n", path);
+        fclose(fp);
+        return NULL;
+    }
+
+    size_t got = fread(buf, 1, (size_t)size, fp);
+    fclose(fp);
+    if (got != (size_t)size) {
+        fprintf(stderr, "FUZZ_SCRIPT: short read on '%s'\n", path);
+        free(buf);
+        return NULL;
+    }
+    buf[size] = '\0';
+    return buf;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -228,10 +277,6 @@ int main(int argc, char **argv) {
     }
 
     PyRun_SimpleString(
-        // "import bz2, csv, ctypes, heapq, lzma, "
-        // "struct, binascii, fcntl, math, "
-        // "pyexpat, select, termios, unicodedata, zlib"
-        // "from xml.parsers import expat"
         "import binascii, unicodedata, faulthandler"
     );
     PyErr_Clear();
@@ -292,6 +337,53 @@ int main(int argc, char **argv) {
             PyErr_Clear();
             return 1;
         }
+    }
+
+    /*
+     * Load and compile the fixed fuzz script once, before the forkserver.
+     * The compiled code object is reused for every iteration; only the
+     * FUZZ_INPUT bytes change.
+     */
+    const char *script_path = getenv("FUZZ_SCRIPT");
+    if (!script_path || !*script_path) {
+        fprintf(stderr, "FUZZ_SCRIPT environment variable is required "
+                        "(path to the Python script to run).\n");
+        return 1;
+    }
+
+    char *script_src = read_script_file(script_path);
+    if (!script_src) {
+        return 1;
+    }
+
+    PyObject *code = Py_CompileString(script_src, script_path, Py_file_input);
+    free(script_src);
+    if (code == NULL) {
+        fprintf(stderr, "FUZZ_SCRIPT: failed to compile '%s':\n", script_path);
+        PyErr_Print();
+        return 1;
+    }
+
+    /*
+     * Warm run: execute the script once with an empty FUZZ_INPUT so that any
+     * top-level imports become resident in the parent process before the
+     * forkserver starts (see FUZZ_WARMUP_IMPORTS note above). A script that
+     * legitimately fails on empty input must not abort startup, so errors are
+     * cleared.
+     */
+    {
+        PyObject *globals = make_fresh_globals();
+        if (globals) {
+            PyObject *empty = PyBytes_FromStringAndSize("", 0);
+            if (empty) {
+                PyDict_SetItemString(globals, "FUZZ_INPUT", empty);
+                Py_DECREF(empty);
+                PyObject *result = PyEval_EvalCode(code, globals, globals);
+                Py_XDECREF(result);
+            }
+            Py_DECREF(globals);
+        }
+        PyErr_Clear();
     }
 
     /* Read once before the forkserver so all forked children inherit the value. */
@@ -388,37 +480,30 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* Py_CompileString is NUL-terminated; inputs with embedded NULs would
-         * be silently truncated, hurting reproducibility. Skip them instead. */
-        if (memchr(buf, '\0', (size_t)len) != NULL) {
-            continue;
-        }
-
-        char *src = (char *)malloc((size_t)len + 1);
-        if (!src) {
+        /*
+         * The AFL input is data, not source: expose the raw bytes (including
+         * any embedded NULs) to the script as FUZZ_INPUT, then run the
+         * pre-compiled script in a fresh namespace.
+         */
+        PyObject *input = PyBytes_FromStringAndSize((char *)buf, len);
+        if (!input) {
             PyErr_Clear();
             continue;
         }
 
-        memcpy(src, buf, (size_t)len);
-        src[len] = '\0';
-
-        /*
-         * Compile first, then eval if compilation succeeded.
-         * Eval is intentionally included in the fuzz cycle.
-         */
-        PyObject *code = Py_CompileString(src, "<fuzz>", Py_file_input);
-        if (code != NULL) {
-            PyObject *globals = make_fresh_globals();
-            if (globals) {
+        PyObject *globals = make_fresh_globals();
+        if (globals) {
+            if (PyDict_SetItemString(globals, "FUZZ_INPUT", input) == 0) {
                 PyObject *result = PyEval_EvalCode(code, globals, globals);
                 Py_XDECREF(result);
-                Py_DECREF(globals);
             } else {
                 PyErr_Clear();
             }
-            Py_DECREF(code);
+            Py_DECREF(globals);
+        } else {
+            PyErr_Clear();
         }
+        Py_DECREF(input);
 
         /*
          * Best-effort cleanup:
@@ -448,8 +533,6 @@ int main(int argc, char **argv) {
 
         maybe_collect_gc(iter);
         PyErr_Clear();
-
-        free(src);
     }
 
     if (log_fd >= 0) {
@@ -457,5 +540,6 @@ int main(int argc, char **argv) {
         close(idx_fd);
     }
 
+    Py_DECREF(code);
     return 0;
 }

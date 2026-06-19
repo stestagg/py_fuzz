@@ -84,3 +84,8 @@ if [ $PY_FUZZ_CMPLOG = "1" ]; then
     fi
     make -j4 -o Programs/_freeze_module -o _bootstrap_python -o Programs/_testembed install
 fi
+
+# Runtime images do not necessarily contain git or the CPython checkout.
+# Preserve the exact source revision (including a hash of tactical changes)
+# next to the installed interpreter for helpers/verinfo.
+/pfm/helpers/verinfo --write-git-info "$INSTALL_ROOT/.git-version-info" "$CHECKOUT_ROOT"
