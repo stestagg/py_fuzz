@@ -10,6 +10,7 @@ class CleanComponent(Enum):
     OUTPUTS = "outputs"
     BUILD = "build"
     ANALYSIS = "analysis"
+    CPYTHON = "cpython"
 
 def clean_dir(name):
     # Removes everything in the given directory, but not the directory itself
@@ -35,6 +36,8 @@ def clean_component(project: Project, component: CleanComponent):
         clean_dir(project_path(project, "envs"))
     elif component == CleanComponent.ANALYSIS:
         clean_dir(project_path(project, "artifacts"))
+    elif component == CleanComponent.CPYTHON:
+        clean_dir(project_path(project, "cpython"))
     elif component == CleanComponent.ALL:
         for comp in CleanComponent:
             if comp != CleanComponent.ALL:

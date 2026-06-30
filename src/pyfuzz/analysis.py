@@ -306,19 +306,34 @@ def get_artifact(project: Project, hash: str) -> Artifact:
     return artifact
 
 
-ANALYZE_CORE_MARKER_FILE = "analyze-core.marker"
-ANALYZE_CORE_MARKER_VERSION = "v1"
+# Marker filename is kept as "analyze-core.marker" for backwards compatibility
+# with already-analyzed artifacts (renaming it would force a re-analysis of
+# every existing core). It marks any artifact as analyzed, not just cores.
+ANALYZE_MARKER_FILE = "analyze-core.marker"
+ANALYZE_MARKER_VERSION = "v2"
+
+_PHASE_MARKER_RE = re.compile(rb"@@PYFUZZ phase=(\w+) iter=\d+@@")
 
 
-async def analyze_core_artifact(project: Project, artifact_hash: str) -> None:
-    """Run full analysis on a core artifact: LLDB, crash linking, input tracking.
+def is_artifact_analyzed(artifact: Artifact) -> bool:
+    """True if the artifact has already been analyzed at the current version."""
+    marker_path = artifact.dir / ANALYZE_MARKER_FILE
+    return marker_path.exists() and marker_path.read_text().strip() == ANALYZE_MARKER_VERSION
 
-    Idempotent: skips all work if analyze-core.marker already contains the current version.
+
+async def analyze_artifact(project: Project, artifact_hash: str) -> None:
+    """Run full analysis on any artifact: LLDB, core/crash linking, input tracking.
+
+    Cores and crashes are both artifacts; they only differ in how LLDB is driven
+    (handled by ``lldb.analyze_core``) and in which counterpart they link to.
+
+    Idempotent: skips all work if the analyze marker already contains the current
+    version.
     """
     artifact = get_artifact(project, artifact_hash)
-    marker_path = artifact.dir / ANALYZE_CORE_MARKER_FILE
+    marker_path = artifact.dir / ANALYZE_MARKER_FILE
 
-    if marker_path.exists() and marker_path.read_text().strip() == ANALYZE_CORE_MARKER_VERSION:
+    if is_artifact_analyzed(artifact):
         return
 
     if not (artifact.dir / "lldb.txt").exists():
@@ -329,23 +344,30 @@ async def analyze_core_artifact(project: Project, artifact_hash: str) -> None:
     pid = artifact.meta.get("pid")
     worker = artifact.meta.get("worker")
 
-    if pid is not None and worker is not None and "linked_crash" not in artifact.meta:
+    # Link this artifact to its counterpart of the opposite type (core <-> crash)
+    # sharing the same crashing pid/worker.
+    if artifact.type == ArtifactType.CORE:
+        counterpart_type, link_key, back_key = ArtifactType.CRASH, "linked_crash", "linked_core"
+    else:
+        counterpart_type, link_key, back_key = ArtifactType.CORE, "linked_core", "linked_crash"
+
+    if pid is not None and worker is not None and link_key not in artifact.meta:
         all_artifacts = await list_artifacts(project)
-        crash = next(
+        counterpart = next(
             (a for a in all_artifacts
-             if a.type == ArtifactType.CRASH
+             if a.type == counterpart_type
              and a.meta.get("pid") == pid
              and a.meta.get("worker") == worker),
             None,
         )
-        if crash is not None:
-            core_meta = {**artifact.meta, "linked_crash": crash.hash}
-            (artifact.dir / "meta.json").write_text(json.dumps(core_meta, indent=2))
-            artifact._meta = core_meta
+        if counterpart is not None:
+            artifact_meta = {**artifact.meta, link_key: counterpart.hash}
+            (artifact.dir / "meta.json").write_text(json.dumps(artifact_meta, indent=2))
+            artifact._meta = artifact_meta
 
-            crash_meta = {**crash.meta, "linked_core": artifact_hash}
-            (crash.dir / "meta.json").write_text(json.dumps(crash_meta, indent=2))
-            crash._meta = crash_meta
+            counterpart_meta = {**counterpart.meta, back_key: artifact_hash}
+            (counterpart.dir / "meta.json").write_text(json.dumps(counterpart_meta, indent=2))
+            counterpart._meta = counterpart_meta
 
     if pid is not None and worker is not None:
         from .trackscript import get_pid_track_summary
@@ -360,7 +382,45 @@ async def analyze_core_artifact(project: Project, artifact_hash: str) -> None:
             if last_input is not None:
                 (artifact.dir / "last_input.txt").write_bytes(last_input)
 
-    marker_path.write_text(ANALYZE_CORE_MARKER_VERSION)
+    if pid is not None and worker is not None:
+        await _attach_harness_output(project, artifact, pid, worker)
+
+    marker_path.write_text(ANALYZE_MARKER_VERSION)
+
+
+# Backwards-compatible alias for callers that predate the unified analyze API.
+analyze_core_artifact = analyze_artifact
+
+
+async def _attach_harness_output(project: Project, artifact: Artifact, pid: int, worker: str) -> None:
+    """Slice the crashing pid's captured stdout/stderr into the artifact dir.
+
+    Writes harness_stdout.txt / harness_stderr.txt (picked up by the LLM view
+    via the *.txt glob), and records crash_phase when the captured output ends
+    on a maintenance phase marker (a strong signal the crash was in gc/module
+    cleanup rather than the input itself).
+    """
+    from .trackscript import get_pid_output
+
+    log_base = project.path("logs") / worker / "child"
+    stdout_bytes, stderr_bytes = await asyncio.to_thread(get_pid_output, log_base, pid)
+
+    if stdout_bytes:
+        (artifact.dir / "harness_stdout.txt").write_bytes(stdout_bytes)
+    if stderr_bytes:
+        (artifact.dir / "harness_stderr.txt").write_bytes(stderr_bytes)
+
+    # If the very last non-empty content is a phase marker, the crash landed in
+    # that maintenance op (no input output came after it).
+    matches = list(_PHASE_MARKER_RE.finditer(stdout_bytes))
+    if matches:
+        last = matches[-1]
+        trailing = stdout_bytes[last.end():].strip()
+        if not trailing:
+            current_meta = json.loads((artifact.dir / "meta.json").read_text())
+            current_meta["crash_phase"] = last.group(1).decode()
+            (artifact.dir / "meta.json").write_text(json.dumps(current_meta, indent=2))
+            artifact._meta = None
 
 
 def render_artifact_llm_view(

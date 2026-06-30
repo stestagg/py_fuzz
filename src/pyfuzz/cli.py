@@ -513,12 +513,13 @@ def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args,
 @click.option("--ccache", is_flag=True, default=False, help="Wrap compiler with ccache (local to this run)")
 @click.option("--configure-args", default="", help="Extra arguments to pass to ./configure")
 @click.option("-m", "--mem-limit", type=int, default=None, help="Memory limit in MB applied as ulimit when running test script")
+@click.option("--log", is_flag=True, default=False, help="Write per-commit build/run output to /pfm/scratch/bisect-logs/<short_hash>.txt")
 @click.pass_context
-def bisect_cmd(ctx, script, ccache, configure_args, mem_limit):
+def bisect_cmd(ctx, script, ccache, configure_args, mem_limit, log):
     from .bisect import run_bisect
     project = Project.load(ctx.obj["project"])
     try:
-        asyncio.run(run_bisect(project, script, ccache=ccache, configure_args=configure_args, mem_limit=mem_limit))
+        asyncio.run(run_bisect(project, script, ccache=ccache, configure_args=configure_args, mem_limit=mem_limit, log=log))
     except KeyboardInterrupt:
         pass
 

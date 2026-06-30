@@ -14,6 +14,7 @@ from rich.panel import Panel
 
 CPYTHON_DIR = Path("/src/cpython")
 BISECT_SCRIPT = Path("/bisect.sh")
+LOG_DIR = Path("/pfm/scratch/bisect-logs")
 MAX_TAG_SUGGESTIONS = 50
 
 console = Console()
@@ -198,10 +199,17 @@ def main() -> None:
         console.print("[red]Error: SCRIPT_NAME environment variable is not set.[/red]")
         sys.exit(1)
 
-    script_path = Path(f"/pfm/bisect_script/{script_name}.py")
+    script_path = Path(f"/pfm/scratch/bisect/{script_name}.py")
     if not script_path.exists():
         console.print(f"[red]Error: Script not found at {script_path}[/red]")
         sys.exit(1)
+
+    if os.environ.get("BISECT_LOG"):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        if any(LOG_DIR.iterdir()):
+            console.print(f"[red]Error: Log directory {LOG_DIR} is not empty.[/red]")
+            sys.exit(1)
+        console.print(f"[blue]Logging per-commit output to {LOG_DIR}/<short_hash>.txt[/blue]")
 
     console.print(
         Panel(

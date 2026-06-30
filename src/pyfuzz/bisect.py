@@ -5,7 +5,7 @@ from .env import Env, Image
 from .project import Project
 
 
-async def run_bisect(project: Project, script_path: Path, *, ccache: bool = False, configure_args: str = "", mem_limit: int | None = None) -> None:
+async def run_bisect(project: Project, script_path: Path, *, ccache: bool = False, configure_args: str = "", mem_limit: int | None = None, log: bool = False) -> None:
     script_name = script_path.stem
     bisect_script_dir = project.path("scratch", "bisect")
     bisect_script_dir.mkdir(parents=True, exist_ok=True)
@@ -19,5 +19,7 @@ async def run_bisect(project: Project, script_path: Path, *, ccache: bool = Fals
         env['CONFIGURE_ARGS'] = configure_args
     if mem_limit is not None:
         env['MEM_LIMIT'] = str(mem_limit)
+    if log:
+        env['BISECT_LOG'] = '1'
     proc = await env.run([], console=True, interactive=True)
     await proc.wait()

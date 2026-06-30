@@ -105,6 +105,12 @@ async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False)
 
     if project.track_inputs:
         env['FUZZ_TRACK_INPUTS'] = f'/pfm/input_tracks/{worker_id}'
+    # Capture the fuzzed code's stdout/stderr into per-worker files (always on).
+    # PYTHONUNBUFFERED is essential: fd 1/2 now point at regular files, so
+    # without it the crashing input's output sits unflushed in Python's buffer
+    # and is lost.
+    env['FUZZ_CAPTURE_OUTPUT'] = f'/pfm/logs/{worker_id}/child'
+    env['PYTHONUNBUFFERED'] = '1'
     if afl_debug:
         env['AFL_DEBUG'] = '1'
 

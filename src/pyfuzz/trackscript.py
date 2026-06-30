@@ -105,6 +105,64 @@ def get_pid_track_summary(path: Path, pid: int) -> tuple[int, bytes | None]:
     return count, last_input
 
 
+_CAP_IDX_MAGIC = 0xF00D
+_CAP_IDX_RECORD = 30   # magic(2) + pid(4) + ts_us(8) + out_off(8) + err_off(8)
+
+
+def get_pid_output(log_base: Path, pid: int) -> tuple[bytes, bytes]:
+    """Return (stdout_bytes, stderr_bytes) the given pid's last child produced.
+
+    Reads the capture index written by fuzz_python.c (one record per forked
+    child: magic, pid, ts_us, stdout_offset, stderr_offset) and slices the
+    `<base>-stdout.log` / `<base>-stderr.log` capture files for the *last*
+    record matching `pid` (the crash is the last thing that pid did), from its
+    recorded offsets to the next record's offsets (or EOF for the final region).
+    """
+    idx_path = log_base.with_name(log_base.name + ".idx")
+    if not idx_path.exists():
+        return b"", b""
+
+    data = idx_path.read_bytes()
+    n = len(data) // _CAP_IDX_RECORD
+
+    last_i: int | None = None
+    for i in range(n):
+        base = i * _CAP_IDX_RECORD
+        (magic,) = struct.unpack_from('<H', data, base)
+        if magic != _CAP_IDX_MAGIC:
+            break
+        (rec_pid,) = struct.unpack_from('<I', data, base + 2)
+        if rec_pid == pid:
+            last_i = i
+
+    if last_i is None:
+        return b"", b""
+
+    base = last_i * _CAP_IDX_RECORD
+    (out_start,) = struct.unpack_from('<Q', data, base + 14)
+    (err_start,) = struct.unpack_from('<Q', data, base + 22)
+
+    # End offsets come from the next record (any pid), else EOF.
+    out_end = err_end = None
+    if last_i + 1 < n:
+        nbase = (last_i + 1) * _CAP_IDX_RECORD
+        (nmagic,) = struct.unpack_from('<H', data, nbase)
+        if nmagic == _CAP_IDX_MAGIC:
+            (out_end,) = struct.unpack_from('<Q', data, nbase + 14)
+            (err_end,) = struct.unpack_from('<Q', data, nbase + 22)
+
+    def _slice(path: Path, start: int, end: int | None) -> bytes:
+        if not path.exists():
+            return b""
+        with path.open('rb') as f:
+            f.seek(start)
+            return f.read() if end is None else f.read(max(0, end - start))
+
+    out_path = log_base.with_name(log_base.name + "-stdout.log")
+    err_path = log_base.with_name(log_base.name + "-stderr.log")
+    return _slice(out_path, out_start, out_end), _slice(err_path, err_start, err_end)
+
+
 def _pid_and_worker_for_artifact(artifact) -> tuple[int | None, str | None]:
     """Resolve (pid, worker) for an artifact.
 
