@@ -43,3 +43,4 @@ pfrun/images/*/initram
 pfrun/pfrun
 .pnpm-store/
 src/pfui/static/assets/
+.pyfuzz_project
