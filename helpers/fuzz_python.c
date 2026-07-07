@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #define TEST_CRASH_INPUT     "fuzztestcrash"
 #define TEST_CRASH_INPUT_LEN 13
@@ -121,6 +122,23 @@ static void cleanup_sys_modules(void) {
 }
 
 /*
+ * Count live thread states in this interpreter. Cheap in the common case: a
+ * pointer walk with no allocation and no Python-level call, so it costs
+ * almost nothing when the fuzzed code didn't spawn anything. Includes the
+ * calling (main) thread state, so a fuzzed input that leaves stray non-main
+ * threads running shows up as a count > 1.
+ */
+static int count_thread_states(void) {
+    PyThreadState *tstate = PyThreadState_GET();
+    int n = 0;
+    for (PyThreadState *p = PyInterpreterState_ThreadHead(tstate->interp);
+         p != NULL; p = PyThreadState_Next(p)) {
+        n++;
+    }
+    return n;
+}
+
+/*
  * Run gc.collect() occasionally to reclaim cyclic garbage created by fuzzed
  * code. Doing this every iteration is usually too expensive.
  */
@@ -203,6 +221,23 @@ int main(int argc, char **argv) {
     if (PyStatus_Exception(status)) {
         Py_ExitStatusException(status);
     }
+
+    /* PyConfig_InitIsolatedConfig leaves install_signal_handlers=0, so CPython
+     * does NOT ignore SIGPIPE/SIGXFSZ the way a normal interpreter does. Replicate
+     * just those SIG_IGN calls (mirroring signal_install_handlers() in CPython's
+     * signalmodule.c) so fuzzed code hitting a broken pipe / file-size limit raises
+     * BrokenPipeError/OSError instead of killing the process and registering as a
+     * false-positive crash. We intentionally do NOT enable install_signal_handlers,
+     * which would also install Python's SIGINT handler and import _signal. */
+#ifdef SIGPIPE
+    PyOS_setsig(SIGPIPE, SIG_IGN);
+#endif
+#ifdef SIGXFZ
+    PyOS_setsig(SIGXFZ, SIG_IGN);
+#endif
+#ifdef SIGXFSZ
+    PyOS_setsig(SIGXFSZ, SIG_IGN);
+#endif
 
     {
         PyObject *code = Py_CompileString("x = 1\n", "<warmup>", Py_file_input);
@@ -508,6 +543,24 @@ int main(int argc, char **argv) {
                 abort();
             }
             PyErr_Clear();
+        }
+
+        /*
+         * Leftover non-main threads are a real contamination source in
+         * persistent mode: unlike a fork-per-input harness, this process is
+         * reused across iterations, so a thread a fuzzed input spawned and
+         * never joined keeps running (and competing for the GIL) into later,
+         * unrelated iterations. There is no safe way to force-kill or join an
+         * arbitrary Python thread from C without risking a hang or corrupting
+         * interpreter state, so instead we just stop reusing this child:
+         * break out of the persistent loop so it exits and AFL's forkserver
+         * spins up a clean one for the next batch.
+         */
+        if (count_thread_states() > 1) {
+            if (do_capture_output)
+                dprintf(1, "@@PYFUZZ phase=leftover_threads iter=%lu@@\n", iter);
+            free(src);
+            break;
         }
 
         /* Phase markers: these maintenance ops run outside any single input's

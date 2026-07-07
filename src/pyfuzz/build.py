@@ -1,9 +1,13 @@
 import asyncio
 import json
+from typing import Callable
 
 from .project import Project
 from .env import Env, Image, terminate_on_cancel
 from .paths import root_path
+from .build_progress import BuildProgressEstimator
+
+ProgressCallback = Callable[[float, float, str], None]
 
 
 async def _git(*args, cwd=None):
@@ -27,17 +31,61 @@ async def ensure_cpython_checkout(project: Project):
         await _git("checkout", "FETCH_HEAD", cwd=cpython_dir)
 
 
-async def _build_run(env, script):
-    proc = await env.run([script], console=True, vm_mem=8192)
-    async with terminate_on_cancel(proc):
-        await proc.wait()
+async def _pump(stream, log_file, feed):
+    """Read a piped stream line-by-line: tee each line to the log and the estimator."""
+    buf = b""
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            log_file.write(line + b"\n")
+            feed(line.decode("utf-8", "replace"))
+    if buf:
+        log_file.write(buf)
+        feed(buf.decode("utf-8", "replace"))
+
+
+def _tail(log_path, n: int = 40) -> str:
+    try:
+        lines = log_path.read_bytes().decode("utf-8", "replace").splitlines()
+        return "\n".join(lines[-n:])
+    except Exception as exc:
+        return f"(could not read {log_path}: {exc})"
+
+
+async def _build_run(env, script, log_path, target, on_progress: ProgressCallback | None, default_phase=None):
+    estimator = BuildProgressEstimator(target, default_phase)
+
+    def feed(line: str) -> None:
+        reading = estimator.feed(line)
+        if reading is not None and on_progress is not None:
+            on_progress(*reading)
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = await env.run([script], vm_mem=8192)
+    success = False
+    with open(log_path, "wb", buffering=0) as log_file:
+        try:
+            async with terminate_on_cancel(proc):
+                await asyncio.gather(
+                    _pump(proc.stdout, log_file, feed),
+                    _pump(proc.stderr, log_file, feed),
+                    proc.wait(),
+                )
+            success = proc.returncode == 0
+        finally:
+            estimator.finish(success)
     if proc.returncode != 0:
-        stderr = (await proc.stderr.read()).decode() if proc.stderr else "<no stderr>"
-        stdout = (await proc.stdout.read()).decode() if proc.stdout else "<no stdout>"
-        raise RuntimeError(f"Build script {script} failed with return code {proc.returncode}\nStderr:\n{stderr}\nStdout:\n{stdout}")
+        raise RuntimeError(
+            f"Build script {script} failed with return code {proc.returncode}\n"
+            f"Last lines of {log_path}:\n{_tail(log_path)}"
+        )
 
 
-async def build_python(project: Project):
+async def build_python(project: Project, on_progress: ProgressCallback | None = None):
     await ensure_cpython_checkout(project)
     env = Env(project, image=Image.BUILD)
 
@@ -56,7 +104,7 @@ async def build_python(project: Project):
     skip_patches = [name for name in all_patches if existing.get(name) == "no"]
     env["PY_FUZZ_SKIP_PATCHES"] = ":".join(skip_patches)
 
-    await _build_run(env, "/pfm/build_scripts/build.sh")
+    await _build_run(env, "/pfm/build_scripts/build.sh", project.path("logs", "build.log"), "py", on_progress)
     # pfrun always exits 0; verify the expected output actually exists
     if not any(project.path("py").glob("bin/python3*-config")):
         raise RuntimeError("Python build failed: python3-config not found in py/bin/")
@@ -67,9 +115,9 @@ async def build_python(project: Project):
     patches_json_path.write_text(json.dumps(updated, indent=2, sort_keys=True) + "\n")
 
 
-async def build_helpers(project: Project):
+async def build_helpers(project: Project, on_progress: ProgressCallback | None = None):
     env = Env(project, image=Image.BUILD)
-    await _build_run(env, "/pfm/build_scripts/build_helpers.sh")
+    await _build_run(env, "/pfm/build_scripts/build_helpers.sh", project.path("logs", "build_helpers.log"), "helpers", on_progress, default_phase="Building helpers")
     # pfrun always exits 0; verify at least one fuzz helper binary was produced
     tool_name = project.harness
     if not (project.path("tools") / tool_name).exists():

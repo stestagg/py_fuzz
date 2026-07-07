@@ -24,16 +24,18 @@ function toTreeNode(group: ArtifactGroupNode, collapsed: Set<string>, selected: 
   };
 }
 
-export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing, onSpecsChange, onSelect, onRefresh, onAnalyzeAll }: {
+export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing, classifying, onSpecsChange, onSelect, onRefresh, onAnalyzeAll, onClassify }: {
   artifacts: ArtifactSummary[];
   specs: string[];
   selected: string | null;
   loading: boolean;
   analyzing: boolean;
+  classifying: boolean;
   onSpecsChange: (specs: string[]) => void;
   onSelect: (hash: string) => void;
   onRefresh: () => void;
   onAnalyzeAll: () => void;
+  onClassify: () => void;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const contents = useMemo(
@@ -53,6 +55,7 @@ export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing
       <H5>Artifacts</H5>
       <div>
         <Button minimal text="Analyze all" loading={analyzing} title="Analyze all unanalyzed artifacts" onClick={onAnalyzeAll} />
+        <Button minimal text="Classify" loading={classifying} title="Classify artifacts with the LLM" onClick={onClassify} />
         <Button minimal icon="refresh" loading={loading} title="Sync and refresh" aria-label="Sync and refresh artifacts" onClick={onRefresh} />
       </div>
     </div>

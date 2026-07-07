@@ -211,14 +211,19 @@ def generate_all_track_scripts(project: Project, base: str) -> list[tuple[Path, 
         if out_path.exists():
             results.append((out_path, False))
             continue
-        script = build_track_script(inputs_path, worker_id=worker_id, pid=pid)
+        script = build_track_script(inputs_path, worker_id=worker_id, pid=pid, artifact_name=artifact.hash)
         out_path.write_text(script)
         results.append((out_path, True))
 
     return results
 
 
-def build_track_script(inputs_path: Path, worker_id: str = "", pid: int | None = None) -> str:
+def build_track_script(
+    inputs_path: Path,
+    worker_id: str = "",
+    pid: int | None = None,
+    artifact_name: str | None = None,
+) -> str:
     """Build a self-contained Python reproducer script from a .log file."""
     if not inputs_path.exists():
         raise FileNotFoundError(f"Track file not found: {inputs_path}")
@@ -233,6 +238,10 @@ def build_track_script(inputs_path: Path, worker_id: str = "", pid: int | None =
         "import sys, gc, unicodedata",
         "",
         f"# track-script: {label}  ({len(inputs)} inputs)",
+    ]
+    if artifact_name:
+        lines.append(f"# artifact: {artifact_name}")
+    lines += [
         "",
         "_sysmodules = sys.modules",
         "_base_modules = set(_sysmodules)",

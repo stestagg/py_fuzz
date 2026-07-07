@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 
 #define TEST_CRASH_INPUT     "fuzztestcrash"
 #define TEST_CRASH_INPUT_LEN 13
@@ -58,6 +59,23 @@ int main(int argc, char **argv) {
     if (PyStatus_Exception(status)) {
         Py_ExitStatusException(status);
     }
+
+    /* PyConfig_InitIsolatedConfig leaves install_signal_handlers=0, so CPython
+     * does NOT ignore SIGPIPE/SIGXFSZ the way a normal interpreter does. Replicate
+     * just those SIG_IGN calls (mirroring signal_install_handlers() in CPython's
+     * signalmodule.c) so fuzzed code hitting a broken pipe / file-size limit raises
+     * BrokenPipeError/OSError instead of killing the process and registering as a
+     * false-positive crash. We intentionally do NOT enable install_signal_handlers,
+     * which would also install Python's SIGINT handler and import _signal. */
+#ifdef SIGPIPE
+    PyOS_setsig(SIGPIPE, SIG_IGN);
+#endif
+#ifdef SIGXFZ
+    PyOS_setsig(SIGXFZ, SIG_IGN);
+#endif
+#ifdef SIGXFSZ
+    PyOS_setsig(SIGXFSZ, SIG_IGN);
+#endif
 
     /* Warm up the PEG parser before the forkserver starts. */
     {

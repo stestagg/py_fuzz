@@ -11,8 +11,11 @@ from pathlib import Path
 import click
 
 ROOT = Path(__file__).parent.resolve()
+REPO_ROOT = ROOT.parent
+PYMUTATE = REPO_ROOT / "pymutate"
 IMAGES = ROOT / "images"
 PACMAN_CACHE = ROOT / ".pacman-cache"
+CARGO_CACHE = ROOT / ".cargo-cache"
 PFRUN_BUILD = ROOT / ".pfrun-build"
 RUNNER_PROJ = ROOT / "runner" / "pfrun.xcodeproj"
 BINARY_OUT = ROOT / "pfrun"
@@ -89,11 +92,14 @@ def build_image_fs(name: str):
     docker_run_cmd = ["docker", "run", "--rm"]
 
     if name == "base":
+        CARGO_CACHE.mkdir(exist_ok=True)
         docker_run_cmd += [
             "--cap-add", "SYS_ADMIN",
             "-v", f"{img / 'build'}:/build",
             "-v", f"{img}:/out",
+            "-v", f"{PYMUTATE}:/pymutate:ro",
             "-v", f"{PACMAN_CACHE}:/var/cache/pacman/pkg",
+            "-v", f"{CARGO_CACHE}:/cargo-cache",
             tag, "fs",
         ]
     elif name == "afl":

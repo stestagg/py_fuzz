@@ -37,20 +37,27 @@ class FileFilter(Filter):
 
 class MetaFilter(Filter):
     KEY = "meta"
-    DOC = "meta:<key>=<value>  Only include artifacts where meta field <key> equals <value>"
+    DOC = (
+        "meta:<key>[=<value>]  Only include artifacts where meta field <key> equals <value>, "
+        "or (with no '=') where <key> is present"
+    )
 
-    def __init__(self, key: str, value: str):
+    def __init__(self, key: str, value: str | None):
         self.key = key
         self.value = value
 
     @classmethod
     def from_clause(cls, rest: str) -> "MetaFilter":
+        if not rest:
+            raise ValueError("meta: requires a key")
         if "=" not in rest:
-            raise ValueError(f"meta: clause must be key=value, got: {rest!r}")
+            return cls(rest, None)
         k, v = rest.split("=", 1)
         return cls(k, v)
 
     def matches(self, artifact: Artifact) -> bool:
+        if self.value is None:
+            return self.key in artifact.meta
         return str(artifact.meta.get(self.key)) == self.value
 
 

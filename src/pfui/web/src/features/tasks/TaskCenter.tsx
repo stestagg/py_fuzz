@@ -4,7 +4,6 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { TaskInfo } from "../../protocol/types";
 import { formatElapsed } from "../../shared/format";
-import { statusToaster } from "../../shared/toaster";
 
 const toaster = OverlayToaster.create({ position: Position.BOTTOM_RIGHT });
 
@@ -12,25 +11,7 @@ export function TaskCenter({ tasks, onStop }: { tasks: TaskInfo[]; onStop: (task
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState<TaskInfo | null>(null);
   const previous = useRef<Map<string, TaskInfo>>(new Map());
-  const runningKey = useRef<string | undefined>(undefined);
   const running = tasks.filter((task) => task.status === "running").length;
-
-  useEffect(() => {
-    void statusToaster.then((instance) => {
-      if (running === 0) {
-        if (runningKey.current) instance.dismiss(runningKey.current);
-        runningKey.current = undefined;
-        return;
-      }
-      runningKey.current = instance.show({
-        intent: Intent.PRIMARY,
-        icon: "time",
-        message: `${running} running task${running === 1 ? "" : "s"}`,
-        action: { text: "View", onClick: () => setOpen(true) },
-        timeout: 0,
-      }, runningKey.current);
-    });
-  }, [running]);
 
   useEffect(() => {
     for (const task of tasks) {

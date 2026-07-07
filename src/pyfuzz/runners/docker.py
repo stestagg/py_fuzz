@@ -47,15 +47,17 @@ async def docker_run(
     env_file.writelines([f'{s}\n' for s in env.shell_sets])
     env_file.flush()
 
-    ncpu = ncpu or env.project.ncpu
+    if ncpu is None:
+        ncpu = env.project.ncpu
     if vm_mem is None:
         vm_mem = env.project.vm_mem
     cmd_str = shlex.join(str(part) for part in cmd)
     docker_cmd = [
         "docker", "run", "--rm",
-        "--cpus", str(ncpu),
         "--env-file", env_file.name,
     ]
+    if ncpu > 0:
+        docker_cmd += ["--cpus", str(ncpu)]
     if vm_mem > 0:
         docker_cmd += ["--memory", f"{vm_mem}m"]
     if interactive:

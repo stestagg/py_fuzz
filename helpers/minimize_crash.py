@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Minimize a track-script reproducer to the smallest set of sections that still crashes."""
 
+import argparse
 import os
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 PYTHON = "/pfm/py/bin/python3"
 MARKER_PREFIX = "# FUZZ_MARKER: "
-TIMEOUT = 480
+TIMEOUT = 800
 TIMEOUT_RETURNCODE = None
 
 
@@ -86,11 +87,25 @@ def assemble(header: str, sections: list[tuple[str, str]]) -> str:
     return header + "".join(text for _, text in sections)
 
 
+def chunkify(items: list[int], n_chunks: int) -> list[set[int]]:
+    """Split items into n_chunks near-equal, contiguous groups."""
+    n_chunks = max(1, min(n_chunks, len(items)))
+    size, remainder = divmod(len(items), n_chunks)
+    chunks = []
+    start = 0
+    for i in range(n_chunks):
+        end = start + size + (1 if i < remainder else 0)
+        chunks.append(set(items[start:end]))
+        start = end
+    return chunks
+
+
 def bisect_sections(
     header: str,
     sections: list[tuple[str, str]],
     process_mem_limit: int,
     script_dir: Path,
+    bisect_factor: int = 2,
 ) -> list[tuple[str, str]]:
     n = len(sections)
     if n == 0:
@@ -104,22 +119,36 @@ def bisect_sections(
         if not candidates:
             return required
         if try_keeping(required):
-            n_removed = len(candidates)
-            print(f"bisect: removed {n_removed} sections ({len(required)} remaining)", file=sys.stderr)
+            print(f"bisect: removed {len(candidates)} sections ({len(required)} remaining)", file=sys.stderr)
             return required
         if len(candidates) == 1:
             return required | candidates
+
         cands = sorted(candidates)
-        mid = len(cands) // 2
-        left, right = set(cands[:mid]), set(cands[mid:])
-        if try_keeping(required | left):
-            print(f"bisect: removed {len(right)} sections", file=sys.stderr)
-            return reduce(left, required)
-        if try_keeping(required | right):
-            print(f"bisect: removed {len(left)} sections", file=sys.stderr)
-            return reduce(right, required)
-        req2 = reduce(left, required)
-        return reduce(right, req2)
+        chunks = chunkify(cands, bisect_factor)
+
+        # try keeping just one chunk first: most aggressive cut, drops
+        # (bisect_factor - 1) / bisect_factor of the candidates in one go.
+        # Try the chunk nearest `required` (latest sections) first, so we
+        # test dropping the earlier sections before the later ones.
+        for chunk in reversed(chunks):
+            if len(chunk) < len(cands) and try_keeping(required | chunk):
+                print(f"bisect: reduced to {len(chunk)} sections", file=sys.stderr)
+                return reduce(chunk, required)
+
+        if len(chunks) > 2:
+            # milder cut: drop just one chunk, keep everything else
+            for i, chunk in enumerate(chunks):
+                complement = set().union(*(c for j, c in enumerate(chunks) if j != i))
+                if try_keeping(required | complement):
+                    print(f"bisect: removed {len(chunk)} sections", file=sys.stderr)
+                    return reduce(complement, required)
+
+        # crash needs sections from multiple chunks; recurse into each independently
+        req = required
+        for chunk in chunks:
+            req = reduce(chunk, req)
+        return req
 
     required = {n - 1}
     candidates = set(range(n - 1))
@@ -127,25 +156,35 @@ def bisect_sections(
     return [sections[i] for i in sorted(final)]
 
 
-def minimize(script_path: Path, bisect_mode: bool = False) -> str:
+def minimize(
+    script_path: Path,
+    bisect_mode: bool = False,
+    skip_initial_run: bool = False,
+    bisect_factor: int = 2,
+) -> str:
     process_mem_limit = int(os.environ.get('PFM_EXEC_MEM_LIMIT', 0) or 0)
     print(f"process memory limit: {process_mem_limit} MB" if process_mem_limit > 0 else "no process memory limit", file=sys.stderr)
     script = script_path.read_text()
 
-    rc = run_file(script_path, process_mem_limit)
-    if rc is TIMEOUT_RETURNCODE:
-        print("error: original script timed out (not a crash)", file=sys.stderr)
-        sys.exit(1)
-    if not is_crash(rc):
-        print(f"error: original script did not crash (exit {rc})", file=sys.stderr)
-        sys.exit(1)
-    print(f"confirmed crash (exit {rc})", file=sys.stderr)
+    if skip_initial_run:
+        print("skipping initial verification run", file=sys.stderr)
+    else:
+        rc = run_file(script_path, process_mem_limit)
+        if rc is TIMEOUT_RETURNCODE:
+            print("error: original script timed out (not a crash)", file=sys.stderr)
+            sys.exit(1)
+        if not is_crash(rc):
+            print(f"error: original script did not crash (exit {rc})", file=sys.stderr)
+            sys.exit(1)
+        print(f"confirmed crash (exit {rc})", file=sys.stderr)
 
     header, sections = parse_sections(script)
     print(f"{len(sections)} sections to minimize", file=sys.stderr)
 
     if bisect_mode:
-        sections = bisect_sections(header, sections, process_mem_limit, script_path.parent)
+        sections = bisect_sections(
+            header, sections, process_mem_limit, script_path.parent, bisect_factor=bisect_factor
+        )
         print(f"bisect done: {len(sections)} sections remaining", file=sys.stderr)
     else:
         changed = True
@@ -172,23 +211,49 @@ def minimize(script_path: Path, bisect_mode: bool = False) -> str:
 
 
 def main() -> None:
-    args = sys.argv[1:]
-    bisect_mode = '--bisect' in args
-    args = [a for a in args if a != '--bisect']
+    global TIMEOUT
 
-    if len(args) != 1:
-        print(f"usage: {sys.argv[0]} [--bisect] <reproducer.py>", file=sys.stderr)
+    parser = argparse.ArgumentParser(
+        description="Minimize a track-script reproducer to the smallest set of sections that still crashes."
+    )
+    parser.add_argument("path", type=Path, help="path to the reproducer script")
+    parser.add_argument(
+        "--no-bisect", action="store_true", help="disable bisection, remove sections one at a time"
+    )
+    parser.add_argument(
+        "--no-initial-run",
+        action="store_true",
+        help="skip the initial verification run (useful for very slow track scripts)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=TIMEOUT, help=f"per-run timeout in seconds (default: {TIMEOUT})"
+    )
+    parser.add_argument(
+        "--bisect-factor",
+        type=int,
+        default=2,
+        help="number of chunks to split candidates into per bisect round (default: 2)",
+    )
+    args = parser.parse_args()
+
+    if args.bisect_factor < 2:
+        parser.error("--bisect-factor must be at least 2")
+
+    TIMEOUT = args.timeout
+
+    if not args.path.exists():
+        print(f"error: not found: {args.path}", file=sys.stderr)
         sys.exit(1)
 
-    path = Path(args[0])
-    if not path.exists():
-        print(f"error: not found: {path}", file=sys.stderr)
-        sys.exit(1)
-
-    result = minimize(path, bisect_mode=bisect_mode)
+    result = minimize(
+        args.path,
+        bisect_mode=not args.no_bisect,
+        skip_initial_run=args.no_initial_run,
+        bisect_factor=args.bisect_factor,
+    )
     print(result)
 
-    min_path = path.with_suffix(".min.py")
+    min_path = args.path.with_suffix(".min.py")
     try:
         min_path.write_text(result)
         print(f"wrote minimized script to {min_path}", file=sys.stderr)

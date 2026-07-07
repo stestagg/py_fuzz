@@ -20,22 +20,25 @@ export function MacLight({ tone, label, active, disabled, onClick }: {
   />;
 }
 
-export function MacWindow({ title, lights, decorativeLights, badge, children }: {
+export function MacWindow({ title, lights, decorativeLights, badge, pin, children }: {
   title: string;
   lights?: ReactNode;
   decorativeLights?: boolean;
   badge?: ReactNode;
+  pin?: ReactNode;
   children?: ReactNode;
 }) {
   const lightContent = decorativeLights
     ? DECORATIVE_TONES.map((tone) => <MacLight key={tone} tone={tone} label="" active={false} disabled onClick={() => undefined} />)
     : lights;
+  const right = (badge || lightContent) && <>
+    {badge && <div className="mac-titlebar-right">{badge}</div>}
+    {lightContent && <div className="mac-lights" aria-hidden={decorativeLights || undefined}>{lightContent}</div>}
+  </>;
   return <div className="mac-window">
     <div className="mac-titlebar">
       <span className="mac-title">{title}</span>
-      {lightContent
-        ? <div className="mac-lights" aria-hidden={decorativeLights || undefined}>{lightContent}</div>
-        : badge ? <div className="mac-titlebar-right">{badge}</div> : null}
+      {(pin || right) && <div className="mac-titlebar-controls">{pin}{right}</div>}
     </div>
     {children}
   </div>;

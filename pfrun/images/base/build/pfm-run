@@ -11,6 +11,22 @@ RED='\033[31m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
+# The guest must always power off on exit, even if `set -e` (sourced from the
+# pfmsetup env file below) kills this script early on a failing command.
+# Without this trap, a failing setup step or fuzz target leaves the VM
+# sitting idle forever - the host never sees guestDidStop, so the fuzz
+# command hangs until manually interrupted.
+cmd_status=1
+do_poweroff() {
+    printf 'PFM_CMD_STATUS=%s\n' "$cmd_status" > /dev/hvc0
+    if command -v poweroff >/dev/null 2>&1; then
+        poweroff -f > /dev/hvc0 2>&1 || poweroff > /dev/hvc0 2>&1
+    elif command -v halt >/dev/null 2>&1; then
+        halt -f > /dev/hvc0 2>&1 || halt > /dev/hvc0 2>&1
+    fi
+}
+trap do_poweroff EXIT
+
 cmdline="$(cat /proc/cmdline)"
 
 case " $cmdline " in
@@ -77,13 +93,6 @@ case " $cmdline " in
                 STATUS_COLOR="$RED"
             fi
             printf "${STATUS_COLOR}${BOLD}[PFM] command exited with status: %s${RESET}\n" "$cmd_status" > /dev/hvc1
-            printf 'PFM_CMD_STATUS=%s\n' "$cmd_status" > /dev/hvc0
-
-            if command -v poweroff >/dev/null 2>&1; then
-                poweroff -f > /dev/hvc0 2>&1 || poweroff > /dev/hvc0 2>&1
-            elif command -v halt >/dev/null 2>&1; then
-                halt -f > /dev/hvc0 2>&1 || halt > /dev/hvc0 2>&1
-            fi
             exit "$cmd_status"
         else
             printf '[PFM] invalid pfmscript payload\n' > /dev/hvc1

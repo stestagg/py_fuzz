@@ -5,6 +5,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ActionMenu } from "../features/actions/ActionMenu";
 import { ArtifactBrowser } from "../features/artifacts/ArtifactBrowser";
 import { ArtifactDetailView } from "../features/artifacts/ArtifactDetailView";
+import { ClassifyDialog } from "../features/artifacts/ClassifyDialog";
 import { Summary } from "../features/dashboard/ProjectOverview";
 import { InputsDialog } from "../features/projects/InputsDialog";
 import { CreateProjectDialog, EditProjectDialog } from "../features/projects/ProjectDialogs";
@@ -25,6 +26,28 @@ function queryProject(): string | null {
   return new URLSearchParams(window.location.search).get("project");
 }
 
+const GROUP_SPECS_KEY = (project: string) => `pfui.groupSpecs.${project}`;
+
+function loadGroupSpecs(project: string): string[] {
+  try {
+    const raw = window.localStorage.getItem(GROUP_SPECS_KEY(project));
+    if (!raw) return DEFAULT_GROUPS;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((value) => typeof value === "string")) return parsed;
+  } catch {
+    // Ignore malformed/inaccessible storage; fall back to the default grouping.
+  }
+  return DEFAULT_GROUPS;
+}
+
+function saveGroupSpecs(project: string, specs: string[]): void {
+  try {
+    window.localStorage.setItem(GROUP_SPECS_KEY(project), JSON.stringify(specs));
+  } catch {
+    // Ignore storage failures (private mode, quota); grouping still works in-session.
+  }
+}
+
 export function App() {
   const client = useMemo(() => new ProtocolClient(), []);
   const generation = useRef(0);
@@ -42,6 +65,7 @@ export function App() {
   const [metric, setMetric] = useState<TrendMetric>("execs_done");
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
   const [groupSpecs, setGroupSpecs] = useState(DEFAULT_GROUPS);
+  const groupSpecsRef = useRef(groupSpecs);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
   const [detail, setDetail] = useState<ArtifactDetail | null>(null);
   const [fullFiles, setFullFiles] = useState<Record<string, string>>({});
@@ -51,6 +75,9 @@ export function App() {
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [action, setAction] = useState<"lldb" | "analyze" | "llm" | null>(null);
   const [analyzingAll, setAnalyzingAll] = useState(false);
+  const [classifyingAll, setClassifyingAll] = useState(false);
+  const [classifyOpen, setClassifyOpen] = useState(false);
+  const pendingClassifyGroup = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -149,6 +176,23 @@ export function App() {
     }
   }, [client, groupSpecs, projectName]);
 
+  // Apply a grouping change and persist it for the current project. Persisting
+  // only on explicit changes (not on project-load) keeps switching projects from
+  // clobbering the newly selected project's saved grouping.
+  const changeGroupSpecs = useCallback((next: string[]) => {
+    groupSpecsRef.current = next;
+    setGroupSpecs(next);
+    if (projectName) saveGroupSpecs(projectName, next);
+  }, [projectName]);
+
+  // Restore the saved grouping whenever the active project changes.
+  useEffect(() => {
+    if (!projectName) return;
+    const stored = loadGroupSpecs(projectName);
+    groupSpecsRef.current = stored;
+    setGroupSpecs(stored);
+  }, [projectName]);
+
   const analyzeAllActive = useMemo(
     () => analyzingAll || tasks.some(
       (task) => task.kind === "analyze-all" && task.project === projectName && task.status === "running",
@@ -156,20 +200,36 @@ export function App() {
     [analyzingAll, tasks, projectName],
   );
 
+  const classifyAllActive = useMemo(
+    () => classifyingAll || tasks.some(
+      (task) => task.kind === "classify-all" && task.project === projectName && task.status === "running",
+    ),
+    [classifyingAll, tasks, projectName],
+  );
+
   useEffect(() => {
     let cleanFinished = false;
     let analyzeAllFinished = false;
+    let classifyAllFinished = false;
     for (const task of tasks) {
       if (task.project !== projectName) continue;
       const previous = previousTasks.current.get(task.id);
       if (previous?.status !== "running" || task.status === "running") continue;
       if (task.kind === "clean") cleanFinished = true;
       if (task.kind === "analyze-all") analyzeAllFinished = true;
+      if (task.kind === "classify-all") classifyAllFinished = true;
     }
     previousTasks.current = new Map(tasks.map((task) => [task.id, task]));
 
     if (analyzeAllFinished) {
       setAnalyzingAll(false);
+      if (projectName) void loadArtifacts(projectName).catch((reason) => setError(String(reason)));
+    }
+    if (classifyAllFinished) {
+      setClassifyingAll(false);
+      const spec = pendingClassifyGroup.current;
+      pendingClassifyGroup.current = null;
+      if (spec && !groupSpecsRef.current.includes(spec)) changeGroupSpecs([...groupSpecsRef.current, spec]);
       if (projectName) void loadArtifacts(projectName).catch((reason) => setError(String(reason)));
     }
     if (!cleanFinished) return;
@@ -181,7 +241,7 @@ export function App() {
     setDetail(null);
     setFullFiles({});
     setRefreshVersion((current) => current + 1);
-  }, [projectName, tasks, loadArtifacts]);
+  }, [projectName, tasks, loadArtifacts, changeGroupSpecs]);
 
   useEffect(() => {
     if (!ready || !projectName || connection !== "connected") return;
@@ -255,11 +315,13 @@ export function App() {
     }
   };
 
-  const themeToggle = <Button minimal icon={theme === "dark" ? "flash" : "moon"} aria-label="Toggle theme" title="Toggle theme" onClick={toggleTheme} />;
-  const taskCenter = <TaskCenter tasks={tasks} onStop={async (taskId) => {
+  const stopTask = useCallback(async (taskId: string) => {
     try { await client.request("task.stop", undefined, { taskId }); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-  }} />;
+  }, [client]);
+
+  const themeToggle = <Button minimal icon={theme === "dark" ? "flash" : "moon"} aria-label="Toggle theme" title="Toggle theme" onClick={toggleTheme} />;
+  const taskCenter = <TaskCenter tasks={tasks} onStop={stopTask} />;
 
   return <div className="app-shell">
     {project && <Summary
@@ -271,6 +333,7 @@ export function App() {
         project={projectName}
         tasks={tasks}
         disabled={connection !== "connected"}
+        onStop={stopTask}
         onStart={async (kind, params) => {
           if (!projectName) return;
           try { await client.request("task.start", projectName, { action: kind, params }); }
@@ -306,7 +369,8 @@ export function App() {
             selected={selectedHash}
             loading={artifactLoading}
             analyzing={analyzeAllActive}
-            onSpecsChange={setGroupSpecs}
+            classifying={classifyAllActive}
+            onSpecsChange={changeGroupSpecs}
             onSelect={(hash) => void selectArtifact(hash)}
             onRefresh={() => { if (projectName) void loadArtifacts(projectName, true).catch((reason) => setError(String(reason))); }}
             onAnalyzeAll={() => {
@@ -314,6 +378,7 @@ export function App() {
               setAnalyzingAll(true);
               void client.request("artifacts.analyze", projectName).catch((reason) => { setAnalyzingAll(false); setError(String(reason)); });
             }}
+            onClassify={() => setClassifyOpen(true)}
           />
           <div className="detail-panel">
             {selectedHash ? <ArtifactDetailView
@@ -348,6 +413,22 @@ export function App() {
         </section>
       )}
     </main>
+    <ClassifyDialog
+      open={classifyOpen}
+      loading={classifyingAll}
+      onClose={() => setClassifyOpen(false)}
+      onSubmit={async ({ dest, free, classes, extraText, applyGroup }) => {
+        if (!projectName) return;
+        setClassifyingAll(true);
+        try {
+          await client.request("artifacts.classify", projectName, { dest, free, classes, extraText });
+          pendingClassifyGroup.current = applyGroup ? `file:${dest}` : null;
+        } catch (reason) {
+          setClassifyingAll(false);
+          throw reason instanceof Error ? reason : new Error(String(reason));
+        }
+      }}
+    />
     <CreateProjectDialog
       open={createProjectName !== null}
       initialName={createProjectName ?? ""}

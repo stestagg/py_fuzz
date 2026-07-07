@@ -82,6 +82,31 @@ EOF
     sudo cp -a /usr/src/afl /fs/usr/src/
     sudo rm -rf /fs/usr/src/afl/.git
 
+    # Build the pymutate AST-aware AFL++ custom mutator and bake the cdylib into
+    # the fs at a fixed path. This must happen here (Docker image build, full
+    # network) because the pfrun VM kernel has no networking and cannot fetch
+    # the ruff/AFLplusplus crate dependencies itself. Baking into the base fs
+    # means every downstream image (afl/build/lldb) inherits it. It is a plain,
+    # non-instrumented shared library loaded by afl-fuzz (not the target), so we
+    # build with the stock rust toolchain, not the AFL compiler wrappers.
+    if [ -d /pymutate ]; then
+        # Persist cargo's registry/git caches across builds. Cloning the ruff git
+        # dependency into a fresh $CARGO_HOME takes ~10min; a bind-mounted
+        # /cargo-cache (see build.py) keeps it warm between runs. chown so the
+        # unprivileged builder user can write into the mount.
+        CARGO_HOME=/cargo-cache
+        if [ -d "$CARGO_HOME" ]; then
+            sudo chown builder:builder "$CARGO_HOME"
+        else
+            CARGO_HOME=/home/builder/.cargo
+        fi
+        env CARGO_HOME="$CARGO_HOME" CARGO_TARGET_DIR=/tmp/pymutate-target \
+            cargo build --manifest-path /pymutate/Cargo.toml \
+            --release --locked -p pymutate-afl
+        sudo install -Dm755 /tmp/pymutate-target/release/libpymutate_afl.so \
+            /fs/usr/local/lib/libpymutate_afl.so
+    fi
+
     sudo mkdir -p /fs/pfm
     sudo mkdir -p /fs/usr/local/bin
 
@@ -104,6 +129,7 @@ EOF
     printf '%s\n' \
         'fs.file-max = 1048576' \
         'kernel.core_pattern = /pfm/cores/core.%p' \
+        'kernel.perf_event_max_stack = 127' \
         'kernel.core_uses_pid = 0' \
         'vm.overcommit_memory = 0' \
         'kernel.randomize_va_space = 0' \

@@ -136,7 +136,7 @@ index 6ea1e210..417348a4 100644
 +
 +  }
  
- #ifdef __linux__
+ #if defined(__linux__) || defined(__APPLE__)
  classify_result:
 @@ -2906,6 +2970,11 @@ store_persistent_record: {
          ck_write(fd, data, len, fn);

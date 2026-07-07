@@ -1,10 +1,25 @@
 import {
-  Button, ButtonGroup, Classes, Collapse, H5, HTMLTable, NonIdealState, Spinner, Tag,
+  Button, ButtonGroup, Collapse, H5, HTMLTable, NonIdealState, Spinner, Tag,
 } from "@blueprintjs/core";
 import { useLayoutEffect, useRef, useState } from "react";
 import type { ArtifactDetail, ArtifactFile } from "../../protocol/types";
 import { MacLight, MacWindow } from "../../shared/MacWindow";
 import { AskLlmDialog } from "./AskLlmDialog";
+import { usePinnedFiles } from "./usePinnedFiles";
+
+function PinButton({ pinned, onToggle }: { pinned: boolean; onToggle: () => void }) {
+  return <Button
+    minimal
+    small
+    className="mac-pin"
+    icon="pin"
+    active={pinned}
+    aria-pressed={pinned}
+    title={pinned ? "Unpin — stop floating this file to the top" : "Pin — float files with this name to the top of every artifact"}
+    aria-label={pinned ? "Unpin file" : "Pin file"}
+    onClick={onToggle}
+  />;
+}
 
 function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
@@ -24,12 +39,19 @@ function CopyButton({ value }: { value: string }) {
 
 type FileViewMode = "min" | "normal" | "max";
 
-function FileCard({ file, fullContent, onLoad }: { file: ArtifactFile; fullContent?: string; onLoad: () => Promise<void> }) {
+function FileCard({ file, fullContent, pinned, onTogglePin, onLoad }: {
+  file: ArtifactFile;
+  fullContent?: string;
+  pinned: boolean;
+  onTogglePin: () => void;
+  onLoad: () => Promise<void>;
+}) {
   const [mode, setMode] = useState<FileViewMode>("normal");
   const [loading, setLoading] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const previewRef = useRef<HTMLPreElement>(null);
   const content = fullContent ?? file.preview ?? "";
+  const pin = <PinButton pinned={pinned} onToggle={onTogglePin} />;
 
   // Let the browser tell us whether the capped preview actually overflows; only
   // then is the maximize option meaningful. Re-measure on content/size changes.
@@ -43,7 +65,7 @@ function FileCard({ file, fullContent, onLoad }: { file: ArtifactFile; fullConte
     return () => observer.disconnect();
   }, [content, mode]);
 
-  if (file.symlink !== null) return <MacWindow title={file.name} badge={<Tag minimal icon="link" className="mac-badge">symlink</Tag>}>
+  if (file.symlink !== null) return <MacWindow title={file.name} pin={pin} badge={<Tag minimal icon="link" className="mac-badge">symlink</Tag>}>
     <div className="mac-window-body">
       <div className="mac-mono">{file.symlink}</div>
       {file.lldbCommand && <div className="mac-run">
@@ -52,11 +74,10 @@ function FileCard({ file, fullContent, onLoad }: { file: ArtifactFile; fullConte
       </div>}
     </div>
   </MacWindow>;
-  if (file.isBinary) return <MacWindow title={file.name} badge={<Tag minimal className="mac-badge">binary</Tag>}>
-    <div className="mac-window-body"><div className={Classes.TEXT_MUTED}>No preview available.</div></div>
-  </MacWindow>;
   return <MacWindow
     title={file.name}
+    pin={pin}
+    badge={file.isBinary ? <Tag minimal className="mac-badge">binary</Tag> : undefined}
     lights={<>
       <MacLight tone="red" label="Title only" active={mode === "min"} onClick={() => setMode("min")} />
       <MacLight tone="yellow" label="Default height" active={mode === "normal"} onClick={() => setMode("normal")} />
@@ -87,9 +108,20 @@ export function ArtifactDetailView({ detail, loading, action, fullFiles, onLinke
   onLoadFile: (filename: string) => Promise<void>;
 }) {
   const [llmOpen, setLlmOpen] = useState(false);
+  const { isPinned, togglePin } = usePinnedFiles();
   if (loading) return <div className="detail-scroll"><div className="centered"><Spinner /></div></div>;
   if (!detail) return <div className="detail-scroll"><NonIdealState icon="search" title="Select an artifact" description="Choose an artifact to inspect its metadata and files." /></div>;
   const busy = action !== null;
+  const renderFile = (file: ArtifactFile) => <FileCard
+    key={file.name}
+    file={file}
+    fullContent={fullFiles[file.name]}
+    pinned={isPinned(file.name)}
+    onTogglePin={() => togglePin(file.name)}
+    onLoad={() => onLoadFile(file.name)}
+  />;
+  const pinnedFiles = detail.files.filter((file) => isPinned(file.name));
+  const otherFiles = detail.files.filter((file) => !isPinned(file.name));
   return <>
     <div className="detail-toolbar">
       <div className="artifact-title"><H5>{detail.hash}</H5><CopyButton value={detail.hash} /><Tag intent={detail.type === "core" ? "primary" : "danger"}>{detail.type}</Tag></div>
@@ -101,17 +133,20 @@ export function ArtifactDetailView({ detail, loading, action, fullFiles, onLinke
     </div>
     <div className="detail-scroll">
       <div className="detail-stack">
+        {pinnedFiles.map(renderFile)}
         <MacWindow title="Info">
           <HTMLTable compact striped className="metadata-table">
             <tbody>{Object.entries(detail.meta).map(([key, value]) => <tr key={key}>
               <th>{key}</th>
               <td>{(key === "linked_crash" || key === "linked_core") && typeof value === "string"
                 ? <Button minimal small text={value} onClick={() => onLinkedArtifact(value)} />
-                : value == null ? "—" : String(value)}</td>
+                : value == null ? "—"
+                : typeof value === "object" ? <span className="metadata-json">{JSON.stringify(value)}</span>
+                : String(value)}</td>
             </tr>)}</tbody>
           </HTMLTable>
         </MacWindow>
-        {detail.files.map((file) => <FileCard key={file.name} file={file} fullContent={fullFiles[file.name]} onLoad={() => onLoadFile(file.name)} />)}
+        {otherFiles.map(renderFile)}
       </div>
     </div>
     <AskLlmDialog detail={detail} open={llmOpen} loading={action === "llm"} onClose={() => setLlmOpen(false)} onSubmit={onAskLlm} />

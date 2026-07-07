@@ -99,7 +99,7 @@ async def run_fuzz(project: Project, instance_num: int, afl_debug: bool = False)
         f"mkdir -p {core_dir}",
         f"echo {core_dir}/core.%p > /proc/sys/kernel/core_pattern",
         f"if [ -s {bpf_config} ]; then",
-        f"    bpftrace {bpf_config} > {bpf_log} 2>&1 &",
+        f"    bpftrace --unsafe {bpf_config} > {bpf_log} 2>&1 &",
         "fi",
     ]
 

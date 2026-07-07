@@ -3,7 +3,7 @@ import os
 import asyncio
 from pathlib import Path
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -157,14 +157,21 @@ def _atomic_write(dest_path: Path, content: str) -> None:
 
 
 def _classification_response_model(labels: list[str], include_rationale: bool) -> type[BaseModel]:
-    label_enum = Enum(
-        "ClassificationLabel",
-        {f"LABEL_{i}": label for i, label in enumerate(labels)},
-    )
+    if labels:
+        label_type: Any = Enum(
+            "ClassificationLabel",
+            {f"LABEL_{i}": label for i, label in enumerate(labels)},
+        )
+        label_field = Field(..., description="Exactly one of the provided class labels.")
+    else:
+        # Free-class mode: the model invents a short tag-style label instead of
+        # picking from a fixed enum.
+        label_type = str
+        label_field = Field(..., description="A short tag-style label naming this artifact's class.")
     fields = {
         "label": (
-            label_enum,
-            Field(..., description="Exactly one of the provided class labels."),
+            label_type,
+            label_field,
         ),
     }
     if include_rationale:
@@ -186,7 +193,6 @@ def _classification_prompt(
     extra_text: str | None,
     include_rationale: bool,
 ) -> list[dict[str, str]]:
-    labels_text = "\n".join(f"- {label}" for label in labels)
     extra = (extra_text or "").strip()
     if extra:
         extra = f"\nAdditional classification guidance:\n{extra}\n"
@@ -196,20 +202,28 @@ def _classification_prompt(
         else " Return only the selected label field."
     )
 
+    if labels:
+        labels_text = "\n".join(f"- {label}" for label in labels)
+        task_instruction = "Choose exactly one of the provided class labels."
+        labels_block = f"Class labels:\n{labels_text}\n"
+    else:
+        # Free-class mode: no fixed list, so ask for an invented tag-style label.
+        task_instruction = "Assign a single concise tag-style label naming this artifact's class."
+        labels_block = ""
+
     return [
         {
             "role": "system",
             "content": (
-                "You classify pyfuzz CPython crash artifacts. Choose exactly one "
-                "of the provided class labels. Base the choice on the artifact "
-                "metadata, crash input, LLDB output, and any additional analysis. "
-                "Do not copy long artifact excerpts." + rationale_instruction
+                "You classify pyfuzz CPython crash artifacts. " + task_instruction + " Base the "
+                "choice on the artifact metadata, crash input, LLDB output, and any additional "
+                "analysis. Do not copy long artifact excerpts." + rationale_instruction
             ),
         },
         {
             "role": "user",
             "content": (
-                f"Class labels:\n{labels_text}\n"
+                f"{labels_block}"
                 f"{extra}\n"
                 "Artifact view:\n"
                 f"{artifact_view}"

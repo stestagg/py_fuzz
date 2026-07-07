@@ -19,7 +19,7 @@ echo Configuring
 ./configure --with-ensurepip=no $CONFIGURE_ARGS >>$OUT 2>&1
 echo Configure Complete, making
 
-if ! make -j4 >>$OUT 2>&1; then
+if ! make -j >>$OUT 2>&1; then
     echo '\e[43;37;1m\e[2K\r MAKE fail \e[0m'
     exit 125
 fi

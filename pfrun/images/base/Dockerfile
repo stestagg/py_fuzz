@@ -2,7 +2,7 @@ FROM ogarcia/archlinux:devel
 
 RUN pacman -Syu --noconfirm && pacman -S --noconfirm \
     base-devel clang llvm lld compiler-rt e2fsprogs vim sudo bc \
-    arch-install-scripts mkinitcpio wget git pahole
+    arch-install-scripts mkinitcpio wget git pahole rust
 
 RUN pacman-key --init && pacman-key --populate archlinux
 

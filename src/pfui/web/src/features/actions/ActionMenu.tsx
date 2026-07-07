@@ -1,17 +1,25 @@
 import {
-  Alert, Button, Checkbox, Dialog, DialogBody, DialogFooter, FormGroup, Menu, MenuItem,
-  NumericInput, Popover,
+  Alert, Button, ButtonGroup, Checkbox, Dialog, DialogBody, DialogFooter, FormGroup,
+  NumericInput, ProgressBar, Spinner, Tag,
 } from "@blueprintjs/core";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { TaskInfo } from "../../protocol/types";
+import { formatElapsed, formatEta } from "../../shared/format";
 
 type Action = "fuzz" | "build" | "clean";
 
-export function ActionMenu({ project, tasks, disabled, onStart }: {
+// build/fuzz/clean are mutually exclusive per project: only one may run at a
+// time for a given project (a different project can run its own concurrently).
+const EXCLUSIVE_KINDS: readonly string[] = ["fuzz", "build", "clean"];
+
+const RUNNING_LABEL: Record<string, string> = { fuzz: "Fuzzing", build: "Building", clean: "Cleaning" };
+
+export function ActionMenu({ project, tasks, disabled, onStart, onStop }: {
   project: string | null;
   tasks: TaskInfo[];
   disabled: boolean;
   onStart: (action: Action, params: Record<string, unknown>) => Promise<void>;
+  onStop: (taskId: string) => Promise<void>;
 }) {
   const [dialog, setDialog] = useState<Action | null>(null);
   const [instances, setInstances] = useState(10);
@@ -21,7 +29,27 @@ export function ActionMenu({ project, tasks, disabled, onStart }: {
   const [cleanComponents, setCleanComponents] = useState<string[]>([]);
   const [cleanConfirm, setCleanConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const fuzzing = tasks.some((task) => task.project === project && task.kind === "fuzz" && task.status === "running");
+  const [stopConfirm, setStopConfirm] = useState(false);
+  const [, forceTick] = useState(0);
+  const active = tasks.find((task) => task.project === project && task.status === "running" && EXCLUSIVE_KINDS.includes(task.kind));
+
+  // Re-render once a second so the running task's elapsed time keeps ticking.
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => forceTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  // The server pushes ETA only when a build milestone is reached; anchor it to
+  // wall-clock time so the displayed estimate counts down between updates.
+  const etaAnchor = useRef<{ eta: number; at: number } | null>(null);
+  useEffect(() => {
+    etaAnchor.current = active?.etaSeconds != null ? { eta: active.etaSeconds, at: Date.now() } : null;
+  }, [active?.id, active?.etaSeconds]);
+  const showProgress = active?.kind === "build" && active.progress != null;
+  const displayEta = etaAnchor.current
+    ? Math.max(0, etaAnchor.current.eta - (Date.now() - etaAnchor.current.at) / 1000)
+    : null;
 
   const submit = async (action: Action, params: Record<string, unknown>) => {
     setSubmitting(true);
@@ -38,16 +66,46 @@ export function ActionMenu({ project, tasks, disabled, onStart }: {
   };
 
   return <>
-    <Popover
-      minimal
-      content={<Menu>
-        <MenuItem icon="flame" text="Fuzz" disabled={fuzzing} label={fuzzing ? "running" : undefined} onClick={() => setDialog("fuzz")} />
-        <MenuItem icon="build" text="Build" onClick={() => setDialog("build")} />
-        <MenuItem icon="trash" intent="danger" text="Clean" onClick={() => setDialog("clean")} />
-      </Menu>}
+    {active ? (
+      <div className="action-running">
+        <Tag large minimal intent="primary" icon={<Spinner size={14} />}>
+          {RUNNING_LABEL[active.kind] ?? active.kind} · {formatElapsed(active.startedAt, active.finishedAt)}
+        </Tag>
+        {showProgress && (
+          <div className="action-progress">
+            <ProgressBar value={active.progress ?? 0} intent="primary" stripes={false} animate={false} />
+            <span className="action-progress-label">
+              {Math.round((active.progress ?? 0) * 100)}%
+              {displayEta != null ? ` · ~${formatEta(displayEta)} left` : ""}
+              {active.phase ? ` · ${active.phase}` : ""}
+            </span>
+          </div>
+        )}
+        {active.stoppable && <Button minimal small intent="danger" icon="stop" title="Stop task" onClick={() => setStopConfirm(true)} />}
+      </div>
+    ) : (
+      <ButtonGroup>
+        <Button icon="build" text="Build" disabled={disabled || !project} onClick={() => setDialog("build")} />
+        <Button intent="primary" icon="flame" text="Fuzz" disabled={disabled || !project} onClick={() => setDialog("fuzz")} />
+        <Button icon="trash" text="Clean" disabled={disabled || !project} onClick={() => setDialog("clean")} />
+      </ButtonGroup>
+    )}
+    <Alert
+      isOpen={stopConfirm}
+      intent="danger"
+      icon="stop"
+      confirmButtonText="Stop task"
+      cancelButtonText="Keep running"
+      canEscapeKeyCancel
+      canOutsideClickCancel
+      onCancel={() => setStopConfirm(false)}
+      onConfirm={() => {
+        setStopConfirm(false);
+        if (active) void onStop(active.id);
+      }}
     >
-      <Button intent="primary" icon="play" rightIcon="caret-down" text="Run" disabled={disabled || !project} />
-    </Popover>
+      Stop <strong>{active?.name}</strong>?
+    </Alert>
 
     <Dialog isOpen={dialog === "fuzz"} onClose={() => setDialog(null)} title="Start fuzzing" icon="flame">
       <DialogBody>

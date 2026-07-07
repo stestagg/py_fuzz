@@ -26,6 +26,9 @@ class TrackedTask:
     thread_backed: bool = False
     exclusive_key: str | None = None
     aio_task: asyncio.Task[Any] | None = None
+    progress: float | None = None
+    eta_seconds: float | None = None
+    phase: str | None = None
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -38,7 +41,27 @@ class TrackedTask:
             "status": self.status,
             "error": self.error,
             "stoppable": self.status == "running" and not self.thread_backed,
+            "progress": self.progress,
+            "etaSeconds": self.eta_seconds,
+            "phase": self.phase,
         }
+
+
+class ProgressReporter:
+    """Handle passed to a long task so it can report progress back to its
+    TrackedTask. Bound to a task id once the task is started; a no-op until then."""
+
+    def __init__(self) -> None:
+        self._manager: TaskManager | None = None
+        self._task_id: str | None = None
+
+    def bind(self, manager: "TaskManager", task_id: str) -> None:
+        self._manager = manager
+        self._task_id = task_id
+
+    def emit(self, progress: float, eta_seconds: float, phase: str) -> None:
+        if self._manager is not None and self._task_id is not None:
+            self._manager.set_progress(self._task_id, progress, eta_seconds, phase)
 
 
 class TaskManager:
@@ -65,6 +88,17 @@ class TaskManager:
         if not self._closing:
             await self._broadcast({"event": "tasks.changed", "data": {"tasks": self.snapshot()}})
 
+    def set_progress(
+        self, task_id: str, progress: float | None, eta_seconds: float | None, phase: str | None
+    ) -> None:
+        tracked = self._tasks.get(task_id)
+        if tracked is None or tracked.status != "running":
+            return
+        tracked.progress = progress
+        tracked.eta_seconds = eta_seconds
+        tracked.phase = phase
+        asyncio.create_task(self.broadcast())
+
     def start(
         self,
         name: str,
@@ -74,6 +108,7 @@ class TaskManager:
         *,
         thread_backed: bool = False,
         exclusive_key: str | None = None,
+        progress_reporter: ProgressReporter | None = None,
     ) -> TrackedTask:
         if self._closing:
             if hasattr(awaitable, "close"):
@@ -98,6 +133,8 @@ class TaskManager:
             exclusive_key=exclusive_key,
         )
         self._tasks[tracked.id] = tracked
+        if progress_reporter is not None:
+            progress_reporter.bind(self, tracked.id)
         tracked.aio_task = asyncio.create_task(awaitable, name=f"{tracked.id}:{name}")
         tracked.aio_task.add_done_callback(lambda task: self._on_done(tracked, task))
         asyncio.create_task(self.broadcast())

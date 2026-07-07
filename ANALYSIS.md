@@ -1,5 +1,8 @@
 # Crash Analysis Tooling
 
+** IF YOU'RE CODEX ** Please use `uv` where needed, BUT you may need to set the uv cache directory to a path your sandbox allows you to use (temp dir?)
+If you do hit any other sandbox issues, talk to the user for help resolving them.
+
 This document describes the local `./pfx` / `./pyfuzz` tooling that is relevant
 when a fuzzing run leaves behind crash files, core files, and difficult
 reproduction questions.
@@ -204,6 +207,64 @@ Example command shapes:
 Relevance to reproduction: it provides coarse classification over a large set
 of artifacts without opening each directory by hand. Regex queries over LLDB
 outputs are especially useful for grouping likely duplicate signatures.
+
+## `analyze stack-fault`
+
+```sh
+./pfx analyze stack-fault ARTIFACT...
+./pfx analyze stack-fault --all
+./pfx analyze stack-fault --all --write
+./pfx analyze stack-fault --all --min likely
+```
+
+Scans existing `lldb.txt` files for a heuristic "stack growth fault" signature.
+This is meant to be a triage hint for crashes where the process probably died
+because the C stack could not grow, often after address-space exhaustion.
+
+Signals include:
+
+- SIGSEGV/SIGBUS with a non-null fault address close to `sp`/`rsp`
+- top frame in evaluator or recursion checking code
+- very deep backtraces
+- repeated evaluator/import frames
+- text hints such as `RLIMIT_AS`, `MemoryError`, `failed to map segment`, or
+  `Stack overflow`
+
+Classifications are intentionally conservative:
+
+- `likely`: stack-near fault plus strong recursion/backtrace shape
+- `possible`: stack-near fault or partial stack-pressure evidence worth review
+- `unlikely`: no meaningful stack-growth signal
+
+With `--write`, the command writes `stackfault.txt` into each artifact directory,
+making the results queryable:
+
+```sh
+./pfx analyze stack-fault --all --write
+./pfx analyze query file:stackfault.txt re:stackfault.txt:"classification: likely"
+```
+
+This does not prove root cause. It is a fast way to pull "probably stack
+allocation/growth failure" artifacts out of a larger crash set before doing
+manual LLDB inspection.
+
+**REMINDER**: THIs is a heuristic, don't just blindly trust the classification, especially if the score is low.
+
+The same classifier runs automatically as part of the general artifact
+analysis pipeline (`analyze_artifact` in `pyfuzz/analysis.py`, used by pfui's
+"Analyze"/"Analyze all" buttons and by `./pfx analyze core`), once `lldb.txt`
+is available. The result is written into `meta.json` under two keys rather
+than a separate file, so it shows up in the artifact metadata alongside
+everything else:
+
+- `stackalloc_score`: the raw integer score.
+- `stackalloc_factors`: the list of signals that fed into it, each prefixed
+  with `+` (counted toward "likely") or `-` (a veto signal arguing against a
+  stack fault, e.g. a near-null fault address unrelated to the stack).
+
+`./pfx analyze core ARTIFACT --force` re-runs LLDB and reclassifies even if
+the artifact was already analyzed — useful after a change to the LLDB
+commands or the classifier itself.
 
 ## `analyze script OUT_NAME BATCH_FILE ARTIFACTS...`
 

@@ -35,6 +35,7 @@ dist/
 
 # pfrun artifacts
 pfrun/.pacman-cache/
+pfrun/.cargo-cache/
 pfrun/.pfrun-build/
 pfrun/images/*/fs.img
 pfrun/images/*/vmlinux

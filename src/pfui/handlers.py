@@ -8,12 +8,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pyfuzz.analysis import analyze_artifact, get_artifact, is_artifact_analyzed, list_artifacts, sync_artifacts
 from pyfuzz.build import build_helpers, build_python
+from pyfuzz.build_progress import median_total
 from pyfuzz.clean import CleanComponent, clean
 from pyfuzz.fuzz import run_fuzz
 from pyfuzz.fuzzdict import make_dict
 from pyfuzz.lldb import analyze_core
 from pyfuzz.llm import (
     DEFAULT_OPENAI_MODEL,
+    LLMError,
+    classify_artifacts,
     create_openai_client,
     describe_artifact,
     validate_artifact_result_filename,
@@ -30,6 +33,7 @@ from .artifact_service import (
 from .input_service import delete_input_file, input_file_payload, input_tree, update_input_file
 from .project_service import create_project, list_projects, project_snapshot, summary_payload, update_project_config
 from .protocol import EmptyParams, ProtocolError, RequestContext, Router
+from .tasks import ProgressReporter
 from .trend_service import load_trend
 
 
@@ -53,6 +57,20 @@ class AskLlmParams(ArtifactParams):
     prompt: str = Field(min_length=1)
     dest: str = Field(min_length=1)
     filenames: list[str]
+
+
+class ClassifyClass(Params):
+    name: str = Field(min_length=1)
+    description: str = ""
+
+
+class ClassifyParams(Params):
+    dest: str = Field(min_length=1)
+    # In free-class mode the caller supplies no fixed classes and the LLM output
+    # is not constrained to a predefined list.
+    free: bool = False
+    classes: list[ClassifyClass] = Field(default_factory=list)
+    extra_text: str = Field(default="", alias="extraText")
 
 
 class TaskStartParams(Params):
@@ -275,6 +293,76 @@ async def artifact_ask_llm(context: RequestContext, project: Project | None, par
     return await asyncio.to_thread(artifact_detail, project, params.hash)
 
 
+@router.handler("artifacts.classify", ClassifyParams)
+async def artifacts_classify(context: RequestContext, project: Project | None, params: ClassifyParams) -> Any:
+    assert project is not None
+
+    try:
+        destination = validate_artifact_result_filename(params.dest.strip())
+    except LLMError as exc:
+        raise ProtocolError("bad_request", str(exc)) from exc
+    validate_local_filename(destination, "Output filename")
+    if destination.endswith(".marker"):
+        raise ProtocolError("bad_request", "Output filename cannot end with .marker")
+
+    # Free-class mode passes empty labels; classify_artifacts then lets the LLM
+    # produce an unconstrained tag-style label instead of picking from a list.
+    if params.free:
+        labels: list[str] = []
+    else:
+        labels = [item.name.strip() for item in params.classes]
+        if not labels:
+            raise ProtocolError("bad_request", "Provide at least one class")
+        if any(not label for label in labels):
+            raise ProtocolError("bad_request", "Class labels cannot be empty")
+        if len(set(labels)) != len(labels):
+            raise ProtocolError("bad_request", "Class labels must be unique")
+
+    # Fold the per-class descriptions and any freeform prompt text into a single
+    # guidance block; the labels written to disk stay clean names.
+    described = [(item.name.strip(), item.description.strip()) for item in params.classes if item.description.strip()]
+    guidance: list[str] = []
+    if described:
+        guidance.append("Class descriptions:\n" + "\n".join(f"- {name}: {desc}" for name, desc in described))
+    if params.extra_text.strip():
+        guidance.append(params.extra_text.strip())
+    extra_text = "\n\n".join(guidance) or None
+
+    model = os.environ.get("PYFUZZ_OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+
+    async def classify_all() -> int:
+        # Only classify artifacts that do not already have the destination file,
+        # mirroring the CLI's skip-existing behaviour without wasting API calls.
+        pending = [
+            artifact.hash
+            for artifact in await list_artifacts(project)
+            if not (get_artifact(project, artifact.hash).dir / destination).exists()
+        ]
+        if not pending:
+            return 0
+        await classify_artifacts(
+            create_openai_client(),
+            project,
+            pending,
+            labels,
+            destination,
+            model,
+            extra_text=extra_text,
+        )
+        return len(pending)
+
+    # Classifying every artifact can outlast a request round-trip, so run it as a
+    # tracked background task and let the UI follow progress via tasks.changed.
+    context.tasks.start(
+        "classify artifacts",
+        "classify-all",
+        project.name,
+        classify_all(),
+        exclusive_key=f"classify-all:{project.name}",
+    )
+    return {"started": True}
+
+
 async def _fuzz_action(project: Project, instances: int, afl_debug: bool, monitor: bool) -> None:
     workers = [asyncio.create_task(run_fuzz(project, index, afl_debug=afl_debug)) for index in range(instances)]
     monitor_task = None
@@ -295,11 +383,37 @@ async def _fuzz_action(project: Project, instances: int, afl_debug: bool, monito
             await asyncio.gather(monitor_task, return_exceptions=True)
 
 
-async def _build_action(project: Project, target: str) -> None:
-    if target in {"all", "py"}:
-        await build_python(project)
-    if target in {"all", "helpers"}:
-        await build_helpers(project)
+async def _build_action(project: Project, target: str, on_progress=None) -> None:
+    stages = [s for s, keys in (("py", {"all", "py"}), ("helpers", {"all", "helpers"})) if target in keys]
+
+    # Combine the stages into one continuous 0..1 bar, weighted by their
+    # historical durations (fall back to py-dominant weights without history).
+    totals = {s: median_total(s) for s in stages}
+    if len(stages) > 1 and all(totals.values()):
+        grand = sum(totals.values())
+        weights = {s: totals[s] / grand for s in stages}
+    else:
+        default = {"py": 0.9, "helpers": 0.1}
+        norm = sum(default[s] for s in stages)
+        weights = {s: default[s] / norm for s in stages}
+    offsets: dict[str, float] = {}
+    acc = 0.0
+    for s in stages:
+        offsets[s] = acc
+        acc += weights[s]
+
+    def wrap(stage: str):
+        if on_progress is None:
+            return None
+        later = sum(totals[s] or 0.0 for s in stages[stages.index(stage) + 1:])
+        return lambda progress, eta, phase: on_progress(
+            min(1.0, offsets[stage] + progress * weights[stage]), eta + later, phase
+        )
+
+    if "py" in stages:
+        await build_python(project, wrap("py"))
+    if "helpers" in stages:
+        await build_helpers(project, wrap("helpers"))
     await make_dict(project)
 
 
@@ -340,7 +454,12 @@ async def task_start(context: RequestContext, project: Project | None, request: 
             raise ProtocolError("bad_request", f"Unknown build target: {target}")
         if context.tasks.running("fuzz", project.name):
             raise ProtocolError("conflict", "Cannot build while fuzzing is running on this project")
-        tracked = context.tasks.start(f"build: {target}", "build", project.name, _build_action(project, target))
+        reporter = ProgressReporter()
+        tracked = context.tasks.start(
+            f"build: {target}", "build", project.name,
+            _build_action(project, target, reporter.emit),
+            progress_reporter=reporter,
+        )
     elif request.action == "clean":
         raw_components = values.get("components")
         if not isinstance(raw_components, list) or not raw_components:

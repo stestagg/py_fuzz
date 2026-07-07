@@ -52,6 +52,34 @@ body.bp6-dark {
   gap: 16px;
 }
 
+.action-running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.action-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.action-progress .bp6-progress-bar {
+  flex: 1;
+  min-width: 60px;
+}
+
+.action-progress-label {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  font-size: 12px;
+}
+
 .section-heading {
   justify-content: space-between;
 }
@@ -195,10 +223,21 @@ body.bp6-dark {
 .group-editor,
 .detail-stack,
 .drawer-content,
-.file-selection {
+.file-selection,
+.classify-classes {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.classify-class-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.classify-class-row > :first-child {
+  flex: 0 0 40%;
 }
 
 .detail-scroll > .mac-window {
@@ -293,6 +332,12 @@ body.bp6-dark {
   width: 180px;
 }
 
+.metadata-json {
+  font-family: var(--bp-font-family-monospace, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  word-break: break-word;
+}
+
 .file-preview {
   max-height: 180px;
   margin: 0;
@@ -366,11 +411,33 @@ body.bp6-dark {
   color: #c5cbd3;
 }
 
-.mac-lights {
+.mac-titlebar-controls {
   display: flex;
   grid-column: 3;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
   justify-self: end;
+}
+
+.mac-lights {
+  display: flex;
+  gap: 8px;
+}
+
+.mac-pin.bp6-button {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 2px;
+  color: #8a8a8a;
+}
+
+.bp6-dark .mac-pin.bp6-button {
+  color: #95a0ae;
+}
+
+.mac-pin.bp6-button.bp6-active,
+.mac-pin.bp6-button:hover {
+  color: var(--bp-intent-primary, #2d72d2);
 }
 
 .mac-titlebar-right {

@@ -1,0 +1,77 @@
+# Candidate operators for the OperatorSwap sub-mutator.
+#
+# One operator per line, TAGGED with its arity family:
+#
+#     <family>: <token>
+#
+# Recognised families:
+#   infix   binary infix operators (arity 2) — arithmetic, bitwise, shift,
+#           comparison. All bind tighter than `not`, so any infix token may
+#           replace any other without a syntax error (`a < b` -> `a @ b` -> `a in
+#           b`); at worst the expression regroups, which is useful new structure.
+#   bool    `and` / `or`. Isolated from `infix`: these bind *below* `not` and
+#           comparison, so their operands can be things (`not d`, `a < b`) that a
+#           tighter operator rejects — `a and not d` -> `a < not d` is a
+#           SyntaxError. So `and`/`or` only ever swap with each other.
+#   prefix  unary prefix operators (arity 1) — `+ - ~ not`. Interchangeable with
+#           each other but NOT with a binary token (arity differs).
+#
+# Untagged lines (and lines whose family keyword isn't recognised) are ignored:
+# an operator of unknown arity can't be swapped in without risking broken syntax.
+# Editing this file broadens mutation coverage without recompiling the mutator
+# logic (it is include_str!'d into the binary).
+
+# --- infix: arithmetic / bitwise ---
+infix: +
+infix: -
+infix: *
+infix: @
+infix: /
+infix: //
+infix: %
+infix: **
+infix: <<
+infix: >>
+infix: &
+infix: |
+infix: ^
+
+# --- infix: comparison ---
+infix: <
+infix: >
+infix: <=
+infix: >=
+infix: ==
+infix: !=
+infix: is
+infix: is not
+infix: in
+infix: not in
+
+# --- bool: boolean (isolated pool; see header) ---
+bool: and
+bool: or
+
+# --- prefix: unary ---
+prefix: +
+prefix: -
+prefix: ~
+prefix: not
+
+# --- assign: statement assignment operators ---
+# `a = 1` <-> `a += 1` / `a **= 1` / ... Only single simple targets (Name /
+# Attribute / Subscript) are ever swapped, so no tuple/multi-target breakage.
+assign: =
+assign: +=
+assign: -=
+assign: *=
+assign: @=
+assign: /=
+assign: //=
+assign: %=
+assign: **=
+assign: <<=
+assign: >>=
+assign: &=
+assign: |=
+assign: ^=

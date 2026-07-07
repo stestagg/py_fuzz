@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["core", "afl"]
+
+# Pin the ruff parser/ast crates to a single git revision. These crates are not
+# published to crates.io, so a git dependency is the only option. Pinning `rev`
+# keeps the (fast-moving) internal API stable across builds.
+[workspace.dependencies]
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", rev = "c5ee52a357d2ecd864b3723384e7fe15c6c473fb" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", rev = "c5ee52a357d2ecd864b3723384e7fe15c6c473fb" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", rev = "c5ee52a357d2ecd864b3723384e7fe15c6c473fb" }
+
+[profile.release]
+# Custom mutators are called on every fuzz iteration; optimize hard.
+opt-level = 3
+lto = true
+codegen-units = 1

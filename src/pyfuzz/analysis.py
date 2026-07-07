@@ -312,34 +312,42 @@ def get_artifact(project: Project, hash: str) -> Artifact:
 ANALYZE_MARKER_FILE = "analyze-core.marker"
 ANALYZE_MARKER_VERSION = "v2"
 
-_PHASE_MARKER_RE = re.compile(rb"@@PYFUZZ phase=(\w+) iter=\d+@@")
-
-
 def is_artifact_analyzed(artifact: Artifact) -> bool:
     """True if the artifact has already been analyzed at the current version."""
     marker_path = artifact.dir / ANALYZE_MARKER_FILE
     return marker_path.exists() and marker_path.read_text().strip() == ANALYZE_MARKER_VERSION
 
 
-async def analyze_artifact(project: Project, artifact_hash: str) -> None:
+async def analyze_artifact(project: Project, artifact_hash: str, *, force: bool = False) -> None:
     """Run full analysis on any artifact: LLDB, core/crash linking, input tracking.
 
     Cores and crashes are both artifacts; they only differ in how LLDB is driven
     (handled by ``lldb.analyze_core``) and in which counterpart they link to.
 
     Idempotent: skips all work if the analyze marker already contains the current
-    version.
+    version. Pass force=True to re-run LLDB and reclassify even if already analyzed
+    (e.g. after a change to the LLDB commands or the stack-fault classifier).
     """
     artifact = get_artifact(project, artifact_hash)
     marker_path = artifact.dir / ANALYZE_MARKER_FILE
 
-    if is_artifact_analyzed(artifact):
+    if not force and is_artifact_analyzed(artifact):
         return
 
-    if not (artifact.dir / "lldb.txt").exists():
+    if force or not (artifact.dir / "lldb.txt").exists():
         from .lldb import analyze_core as _run_lldb
         await _run_lldb(project, artifact_hash)
         artifact._meta = None  # reload meta after lldb may enrich it
+
+    lldb_text = artifact.lldb_output
+    if lldb_text:
+        from .stackfault import classify_lldb_stack_fault
+        stack_fault = classify_lldb_stack_fault(lldb_text)
+        current_meta = json.loads((artifact.dir / "meta.json").read_text())
+        current_meta["stackalloc_score"] = stack_fault.score
+        current_meta["stackalloc_factors"] = list(stack_fault.factors)
+        (artifact.dir / "meta.json").write_text(json.dumps(current_meta, indent=2))
+        artifact._meta = None
 
     pid = artifact.meta.get("pid")
     worker = artifact.meta.get("worker")
@@ -395,10 +403,8 @@ analyze_core_artifact = analyze_artifact
 async def _attach_harness_output(project: Project, artifact: Artifact, pid: int, worker: str) -> None:
     """Slice the crashing pid's captured stdout/stderr into the artifact dir.
 
-    Writes harness_stdout.txt / harness_stderr.txt (picked up by the LLM view
-    via the *.txt glob), and records crash_phase when the captured output ends
-    on a maintenance phase marker (a strong signal the crash was in gc/module
-    cleanup rather than the input itself).
+    Writes harness_stdout.txt / harness_stderr.txt, picked up by the LLM view
+    via the *.txt glob.
     """
     from .trackscript import get_pid_output
 
@@ -409,18 +415,6 @@ async def _attach_harness_output(project: Project, artifact: Artifact, pid: int,
         (artifact.dir / "harness_stdout.txt").write_bytes(stdout_bytes)
     if stderr_bytes:
         (artifact.dir / "harness_stderr.txt").write_bytes(stderr_bytes)
-
-    # If the very last non-empty content is a phase marker, the crash landed in
-    # that maintenance op (no input output came after it).
-    matches = list(_PHASE_MARKER_RE.finditer(stdout_bytes))
-    if matches:
-        last = matches[-1]
-        trailing = stdout_bytes[last.end():].strip()
-        if not trailing:
-            current_meta = json.loads((artifact.dir / "meta.json").read_text())
-            current_meta["crash_phase"] = last.group(1).decode()
-            (artifact.dir / "meta.json").write_text(json.dumps(current_meta, indent=2))
-            artifact._meta = None
 
 
 def render_artifact_llm_view(

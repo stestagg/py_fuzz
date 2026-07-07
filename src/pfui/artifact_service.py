@@ -142,13 +142,7 @@ def _file_payload(path: Path, artifact: Artifact, project: Project) -> dict[str,
             raw = handle.read(FILE_PREVIEW_READ_LIMIT + 1 if is_large else size)
         if is_large:
             raw = raw[:FILE_PREVIEW_READ_LIMIT]
-        if b"\x00" in raw:
-            raise UnicodeDecodeError("utf-8", raw, 0, 1, "NUL byte")
-        text = raw.decode("utf-8")
-        control_count = sum(byte < 32 and byte not in {9, 10, 13} for byte in raw)
-        if raw and control_count / len(raw) > 0.01:
-            raise UnicodeDecodeError("utf-8", raw, 0, 1, "control characters")
-    except (UnicodeDecodeError, IsADirectoryError, OSError):
+    except OSError:
         return {
             "name": path.name,
             "symlink": None,
@@ -157,6 +151,9 @@ def _file_payload(path: Path, artifact: Artifact, project: Project) -> dict[str,
             "isBinary": True,
             "lldbCommand": None,
         }
+    control_count = sum(byte < 32 and byte not in {9, 10, 13} for byte in raw)
+    is_binary = b"\x00" in raw or (bool(raw) and control_count / len(raw) > 0.01)
+    text = raw.decode("utf-8", errors="replace")
     if is_large:
         preview = "\n".join(text.splitlines()[:10])[:FILE_PREVIEW_TEXT_LIMIT]
         return {
@@ -164,7 +161,7 @@ def _file_payload(path: Path, artifact: Artifact, project: Project) -> dict[str,
             "symlink": None,
             "preview": preview,
             "previewComplete": False,
-            "isBinary": False,
+            "isBinary": is_binary,
             "lldbCommand": None,
         }
     return {
@@ -172,7 +169,7 @@ def _file_payload(path: Path, artifact: Artifact, project: Project) -> dict[str,
         "symlink": None,
         "preview": text,
         "previewComplete": True,
-        "isBinary": False,
+        "isBinary": is_binary,
         "lldbCommand": None,
     }
 

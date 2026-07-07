@@ -1,0 +1,27 @@
+[package]
+name = "pymutate-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "AST-aware Python source mutation logic (AFL-independent core)"
+
+[lib]
+name = "pymutate_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mutate"
+path = "src/bin/mutate.rs"
+
+[dependencies]
+ruff_python_parser = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_text_size = { workspace = true }
+rand = "0.8"
+trickydata-macros = "*"
+
+[dev-dependencies]
+# The `corpus` integration test reparses mutator output to assert type-swap
+# invariants; integration tests can't see the lib's regular deps.
+ruff_python_parser = { workspace = true }
+ruff_python_ast = { workspace = true }

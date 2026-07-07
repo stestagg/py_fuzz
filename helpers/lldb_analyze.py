@@ -2,6 +2,7 @@
 """Run an lldb analysis session using the lldb Python API."""
 
 import argparse
+import re
 import subprocess
 import sys
 import time
@@ -27,6 +28,9 @@ def import_lldb():
     return _lldb
 
 
+_FAULT_ADDR_RE = re.compile(r"fault address=0x([0-9a-fA-F]+)")
+
+
 def run_command(debugger, cmd: str) -> str:
     import lldb
     ret = lldb.SBCommandReturnObject()
@@ -36,11 +40,23 @@ def run_command(debugger, cmd: str) -> str:
 
 def collect_diagnostics(debugger, commands=None) -> str:
     if commands is None:
-        commands = ("thread list", "bt all", "register read")
+        commands = ("thread list", "bt all", "register read", "memory region $sp")
     parts = []
     for cmd in commands:
         parts.append(f"(lldb) {cmd}")
         parts.append(run_command(debugger, cmd))
+
+    # If the stop reason names a fault address, look up its region too. This
+    # works against a loaded core (no live process required) and tells us
+    # whether the fault landed in the unmapped hole just below the stack
+    # region (stack-growth fault) or in the unmapped hole starting at 0x0
+    # (NULL/small-offset dereference, unrelated to the stack).
+    match = _FAULT_ADDR_RE.search("\n".join(parts))
+    if match is not None:
+        fault_cmd = f"memory region 0x{match.group(1)}"
+        parts.append(f"(lldb) {fault_cmd}")
+        parts.append(run_command(debugger, fault_cmd))
+
     return "\n".join(parts)
 
 

@@ -79,6 +79,9 @@ export type TaskInfo = {
   status: "running" | "done" | "error" | "cancelled";
   error: string | null;
   stoppable: boolean;
+  progress?: number | null;
+  etaSeconds?: number | null;
+  phase?: string | null;
 };
 
 export type SessionReady = {

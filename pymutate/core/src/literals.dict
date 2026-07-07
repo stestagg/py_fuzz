@@ -1,0 +1,110 @@
+# Candidate literals for the TypeSwap sub-mutator.
+#
+# One Python snippet per line. Blank lines and lines starting with '#' are
+# ignored. Editing this file broadens mutation coverage without recompiling the
+# mutator logic (it is include_str!'d into the binary).
+#
+# Each snippet may be TAGGED with the Python type it represents, using a
+# leading `<tag>: ` prefix, e.g.
+#
+#     int: 42
+#     str: "hello"
+#
+# Recognised tags: none bool int float complex str bytes ellipsis
+#                  list tuple dict set
+#
+# The tag lets TypeSwap avoid no-op-ish swaps: when it replaces a literal it
+# only ever picks a candidate of a *different* kind (so a string is never
+# swapped for another string). A line whose left-of-first-colon isn't one of
+# the recognised tags is treated as UNTAGGED (kind unknown) and is therefore
+# always eligible as a replacement for any literal. Snippets that themselves
+# contain colons (dict/slice literals) are fine untagged: `{1: 2}` reads as
+# untagged because `{1` is not a recognised tag.
+
+# --- singletons ---
+none: None
+bool: True
+bool: False
+ellipsis: ...
+
+# --- ints (incl. edge magnitudes that reach interesting C paths) ---
+int: 0
+int: 1
+int: -1
+int: 2
+int: 255
+int: 256
+int: 65535
+int: 65536
+int: 2147483647
+int: 2147483648
+int: -2147483648
+int: 4294967295
+int: 4294967296
+int: 9223372036854775807
+int: 9223372036854775808
+int: 18446744073709551615
+int: 18446744073709551616
+int: 340282366920938463463374607431768211456
+int: 0x0
+int: 0xFF
+int: 0o777
+int: 0b1010
+int: 1_000_000
+
+# --- floats ---
+float: 0.0
+float: -0.0
+float: 1.0
+float: -1.0
+float: 3.141592653589793
+float: 1e308
+float: 1e-308
+float: 1e309
+float: float('inf')
+float: float('-inf')
+float: float('nan')
+
+# --- complex ---
+complex: 0j
+complex: 1j
+complex: 1+2j
+
+# --- str (incl. surrogate/escape/unicode edge cases) ---
+str: ''
+str: 'a'
+str: 'A' * 4096
+str: '\x00'
+str: '\U0010FFFF'
+str: '\ud800'
+str: '\N{BULLET}'
+str: '%s%n%x'
+str: '{0}{1}'
+str: '\\'
+str: 'π'
+
+# --- bytes ---
+bytes: b''
+bytes: b'\x00'
+bytes: b'\xff\xfe'
+bytes: b'\x00' * 4096
+
+# --- containers (NOT ast literal nodes; only ever appear as swap targets) ---
+list: []
+list: [0]
+list: [None] * 1024
+tuple: ()
+tuple: (0,)
+tuple: (0, 1)
+dict: {}
+dict: {0: 0}
+set: set()
+set: {0}
+frozenset()
+range(1000000)
+
+# --- untagged expressions: eligible to replace any literal kind ---
+memoryview(b'')
+bytearray(1024)
+object()
+NotImplemented

@@ -452,12 +452,13 @@ def analyze_link_core(ctx):
 
 @analyze.command("core")
 @click.argument("artifact_hash")
+@click.option("-f", "--force", is_flag=True, help="Re-run LLDB and reclassify even if already analyzed.")
 @click.pass_context
-def analyze_core_cmd(ctx, artifact_hash):
+def analyze_core_cmd(ctx, artifact_hash, force):
     """Run full analysis on a core artifact (LLDB, crash link, input tracking)."""
     from .analysis import analyze_core_artifact
     project = Project.load(ctx.obj["project"])
-    asyncio.run(analyze_core_artifact(project, artifact_hash))
+    asyncio.run(analyze_core_artifact(project, artifact_hash, force=force))
     click.echo(f"Analysis complete: artifacts/{artifact_hash}/")
 
 
@@ -474,6 +475,51 @@ def analyze_query(ctx, clauses):
         raise click.UsageError(str(e))
     for artifact in results:
         click.echo(artifact.hash)
+
+
+@analyze.command("stack-fault")
+@click.argument("artifact_hashes", nargs=-1)
+@click.option("--all", "all_artifacts", is_flag=True, help="Scan all artifacts with lldb.txt.")
+@click.option("--write", is_flag=True, help="Write the result into each artifact directory.")
+@click.option("--dest", default="stackfault.txt", show_default=True, help="Filename to write with --write.")
+@click.option(
+    "--min",
+    "min_classification",
+    type=click.Choice(["unlikely", "possible", "likely"]),
+    default="possible",
+    show_default=True,
+    help="Minimum classification to print.",
+)
+@click.pass_context
+def analyze_stack_fault(ctx, artifact_hashes, all_artifacts, write, dest, min_classification):
+    """Heuristically flag LLDB outputs that look like stack-growth segfaults."""
+    if not all_artifacts and not artifact_hashes:
+        raise click.UsageError("Provide artifact hashes or use --all.")
+
+    from .stackfault import analyze_stack_fault_artifacts
+
+    rank = {"unlikely": 0, "possible": 1, "likely": 2}
+    project = Project.load(ctx.obj["project"])
+    hashes = None if all_artifacts else list(artifact_hashes)
+    results = asyncio.run(
+        analyze_stack_fault_artifacts(project, hashes, write=write, dest=dest)
+    )
+
+    missing = set(artifact_hashes) - {artifact.hash for artifact, _ in results}
+    for artifact_hash in sorted(missing):
+        click.echo(f"{artifact_hash}: missing", err=True)
+
+    for artifact, analysis in results:
+        if analysis is None:
+            continue
+        if rank[analysis.classification] < rank[min_classification]:
+            continue
+        signals = "; ".join(analysis.signals[:3])
+        suffix = f" -> {dest}" if write else ""
+        click.echo(
+            f"{artifact.hash}: {analysis.classification} "
+            f"score={analysis.score} {signals}{suffix}"
+        )
 
 
 @cli.command("run-dist")
@@ -511,7 +557,7 @@ def run_dist_cmd(ctx, script, ref, interactive, debug, env_vars, configure_args,
 @cli.command("bisect")
 @click.argument("script", type=click.Path(exists=True, path_type=Path))
 @click.option("--ccache", is_flag=True, default=False, help="Wrap compiler with ccache (local to this run)")
-@click.option("--configure-args", default="", help="Extra arguments to pass to ./configure")
+@click.option("--configure-args", default="", help="Extra arguments to pass to ./configure, on top of the project's py_debug/py_configure_extra_args settings")
 @click.option("-m", "--mem-limit", type=int, default=None, help="Memory limit in MB applied as ulimit when running test script")
 @click.option("--log", is_flag=True, default=False, help="Write per-commit build/run output to /pfm/scratch/bisect-logs/<short_hash>.txt")
 @click.pass_context

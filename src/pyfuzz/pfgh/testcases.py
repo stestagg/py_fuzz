@@ -27,7 +27,16 @@ for the fuzzer rather than self-contained test cases.
 It's ok to diverge from the exact implication of the pr to cover more related areas.
 The PR may introduce a problem, or may indicate a general area of interest that should be explored by the fuzzer.
 
-CRITICAL: NEVER import ctypes, avoid threading where possible.
+CRITICAL: fuzzing relies on a crash being an actionable outcome.  This means it's important to avoid inputs that:
+ - use ctypes
+ - raise a fatal signal, (os.kill, signal.raise_signal, etc)
+ - call pickle/cpickle with input-defined data
+ - adjust rlimits or other resource/process settings, unless the risk of causing a false-positive or poisioning the process is tiny. (remmeber the fuzzer will be trying to alter inputs to break things)
+
+ If PR is directly related to any of the above critical aviod areas, and there is no 
+ safe alternative codepath to explore, then skip the PR and return an empty list of inputs.
+
+ The fuzzer has agressive timeouts, so avoid inputs that may take a long time to run, or that will cause the interpreter to hang or enter an infinite loop.
 
 Here is the PR description:
 {pr_description}
