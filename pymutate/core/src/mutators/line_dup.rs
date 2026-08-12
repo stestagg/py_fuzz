@@ -57,6 +57,19 @@ impl<'a> Visitor<'a> for StmtCollector {
     }
 }
 
+/// Statement sites usable for duplication, each paired with its indent so the
+/// copy stays aligned. Statements that don't lead their line are dropped — see
+/// [`line_indent`].
+fn stmt_sites<'a>(ctx: &AstCtx<'a>) -> Vec<(TextRange, &'a str)> {
+    let mut collector = StmtCollector { ranges: Vec::new() };
+    walk_module(&mut collector, ctx.module);
+    collector
+        .ranges
+        .iter()
+        .filter_map(|r| line_indent(ctx.source, usize::from(r.start())).map(|ind| (*r, ind)))
+        .collect()
+}
+
 pub struct LineDup;
 
 impl LineDup {
@@ -76,19 +89,15 @@ impl SubMutator for LineDup {
         "line_dup"
     }
 
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // The copy is the source text itself, so each site yields one edit.
+        nonblank_lines(ctx.source).len() + stmt_sites(ctx).len()
+    }
+
     fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
         let src = ctx.source;
         let lines = nonblank_lines(src);
-
-        // Statement sites paired with their indent (only line-leading statements
-        // — see `line_indent`), so a duplicated block stays aligned.
-        let mut collector = StmtCollector { ranges: Vec::new() };
-        walk_module(&mut collector, ctx.module);
-        let stmts: Vec<(TextRange, &str)> = collector
-            .ranges
-            .iter()
-            .filter_map(|r| line_indent(src, usize::from(r.start())).map(|ind| (*r, ind)))
-            .collect();
+        let stmts = stmt_sites(ctx);
 
         // One flat candidate space across both flavours; pick uniformly.
         let idx = rng.index(lines.len() + stmts.len())?;
@@ -132,7 +141,10 @@ mod tests {
     fn always_grows_the_input() {
         for seed in 0..32u32 {
             if let Some(out) = run("x = 1\n", seed) {
-                assert!(out.len() > "x = 1\n".len(), "seed {seed}: not additive: {out:?}");
+                assert!(
+                    out.len() > "x = 1\n".len(),
+                    "seed {seed}: not additive: {out:?}"
+                );
             }
         }
     }

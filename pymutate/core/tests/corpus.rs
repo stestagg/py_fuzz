@@ -230,7 +230,10 @@ fn operator_swap_converts_assignment_to_augmented() {
             .map(|s| is_aug_assign(&s))
             .unwrap_or(false)
     });
-    assert!(became_aug, "expected `a = 1` to become an augmented assignment");
+    assert!(
+        became_aug,
+        "expected `a = 1` to become an augmented assignment"
+    );
 }
 
 #[test]
@@ -298,10 +301,181 @@ fn respects_max_size() {
     }
 }
 
+/// The driver weights sub-mutators by `edit_space()`, so a zero there means
+/// "never picked". That is only sound if a zero really does mean the sub-mutator
+/// had nothing to offer — and conversely, a non-zero must be backed by a real
+/// edit, or the weight steals budget from mutators that would have produced one.
 #[test]
-fn non_utf8_returns_none() {
+fn edit_space_agrees_with_what_mutators_actually_produce() {
+    use pymutate_core::mutators::{registry, AstCtx};
+    use ruff_python_parser::{parse_unchecked, Mode, ParseOptions};
+
+    // Deliberately varied: some have no literals, no calls, no operators, no
+    // assignments, so most sub-mutators score zero on most of them.
+    let cases: &[&str] = &[
+        "print(value)\n",
+        "x = 1\n",
+        "a < b\n",
+        "42\n",
+        "# just a comment\n",
+        "def f(a, b=2):\n    return a @ b\n",
+        "[1, 2, 3]\n",
+        "\n",
+    ];
+
+    for src in cases {
+        let parsed = parse_unchecked(src, ParseOptions::from(Mode::Module));
+        let ctx = AstCtx {
+            source: src,
+            module: parsed.syntax(),
+        };
+        for m in registry() {
+            let space = m.edit_space(&ctx);
+            let fires = (0..64u32).any(|seed| {
+                pymutate_core::mutate_with(src.as_bytes(), seed, MAX_SIZE, &[m.name()]).is_some()
+            });
+            assert_eq!(
+                space > 0,
+                fires,
+                "{}: edit_space()={space} disagrees with mutate() on {src:?}",
+                m.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn weighting_favours_bigger_spaces_without_starving_small_ones() {
+    // The log compression is the whole policy: proportional weighting hands
+    // ~97% of the budget to the dictionary-backed mutators, and uniform hands
+    // as much to a one-output mutator as to a thousand-output one.
+    let src = b"from decimal import Decimal\nx = Decimal('1e999')\nprint(x, 2)\n";
+    let report = pymutate_core::weight_report(src, &[]);
+
+    let live: Vec<_> = report.iter().filter(|&&(_, space, _)| space > 0).collect();
+    assert!(
+        live.len() >= 4,
+        "expected several live sub-mutators: {report:?}"
+    );
+
+    // A sub-mutator with nothing to do scores zero and is never picked. (This
+    // input has no literals, calls or assignments, so several are idle.)
+    let idle = pymutate_core::weight_report(b"a and b\n", &[]);
+    assert!(
+        idle.iter()
+            .any(|&(_, space, weight)| space == 0 && weight == 0),
+        "expected idle sub-mutators to score zero: {idle:?}"
+    );
+
+    let max = live.iter().map(|&&(_, _, w)| w).max().unwrap();
+    let min = live.iter().map(|&&(_, _, w)| w).min().unwrap();
+    assert!(
+        min >= 1,
+        "a live sub-mutator was starved to zero: {report:?}"
+    );
+    assert!(
+        max <= 10 * min,
+        "weighting is too skewed ({max} vs {min}): {report:?}"
+    );
+    // ... but it must still discriminate, or we may as well pick uniformly.
+    assert!(max > min, "weighting collapsed to uniform: {report:?}");
+}
+
+#[test]
+fn stacking_one_edit_is_the_plain_driver() {
+    // `max_edits = 1` must consume no extra randomness, so the stacked entry
+    // point stays a drop-in for the single-edit one (and for its tests).
+    let src = b"x = 1\ny = x + 2\n";
+    for seed in 0..32u32 {
+        assert_eq!(
+            pymutate_core::mutate_stacked(src, seed, MAX_SIZE, &[], 1),
+            pymutate_core::mutate(src, seed, MAX_SIZE),
+            "seed {seed}: max_edits=1 diverged from the single-edit driver"
+        );
+    }
+}
+
+#[test]
+fn stacking_enlarges_the_output_space_of_a_tiny_input() {
+    // The whole point of stacking: a two-line seed has only a few hundred
+    // single-edit outputs, so a stage exhausts them and then repeats itself.
+    let src = b"x = 1\ny = x\n";
+    let distinct = |max_edits: usize| {
+        (0..256u32)
+            .filter_map(|seed| pymutate_core::mutate_stacked(src, seed, MAX_SIZE, &[], max_edits))
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
+    let single = distinct(1);
+    let stacked = distinct(4);
+    assert!(
+        stacked > single,
+        "stacking produced no extra variety: {stacked} vs {single}"
+    );
+}
+
+#[test]
+fn stacked_output_respects_max_size() {
+    // Every edit in the chain is checked, not just the first.
+    let src = b"a = b\nc = d\n";
+    for seed in 0..128u32 {
+        if let Some(out) = pymutate_core::mutate_stacked(src, seed, 24, &[], 4) {
+            assert!(out.len() <= 24, "stacked output exceeded max_size: {out:?}");
+        }
+    }
+}
+
+#[test]
+fn non_utf8_with_no_valid_prefix_returns_none() {
+    // Nothing decodes, so there is no syntax to mutate.
     let bad = [0xff, 0xff, 0xfe, 0x00];
     for seed in 0..8u32 {
         assert!(pymutate_core::mutate(&bad, seed, MAX_SIZE).is_none());
     }
+}
+
+#[test]
+fn non_utf8_tail_is_mutated_around_and_preserved() {
+    // Havoc routinely mangles the tail of a queue entry. The decodable head must
+    // still be mutated, and the raw bytes must come back through untouched.
+    let tail: &[u8] = &[0xff, 0xfe, 0x00, 0x80];
+    let mut src = b"print(value)\n".to_vec();
+    src.extend_from_slice(tail);
+
+    let mut mutated = 0usize;
+    for seed in 0..64u32 {
+        let Some(out) = pymutate_core::mutate(&src, seed, MAX_SIZE) else {
+            continue;
+        };
+        assert_ne!(out, src, "seed {seed}: no-op mutation");
+        assert!(
+            out.ends_with(tail),
+            "seed {seed}: undecodable tail was not preserved: {out:?}"
+        );
+        mutated += 1;
+    }
+    assert!(
+        mutated > 0,
+        "expected the valid prefix of a part-binary input to be mutated"
+    );
+}
+
+#[test]
+fn oversized_edit_falls_through_to_a_smaller_one() {
+    // `max_size` leaves room for a few bytes of growth only. Sub-mutators whose
+    // edit doesn't fit (a duplicated line, a splatted container) must not sink
+    // the call — a mutator with a small enough edit should still get a turn.
+    let src = b"a = bb\n";
+    let mutated = (0..64u32)
+        .filter(|&seed| {
+            pymutate_core::mutate(src, seed, src.len() + 2).is_some_and(|out| {
+                assert!(out.len() <= src.len() + 2, "output exceeded max_size");
+                true
+            })
+        })
+        .count();
+    assert!(
+        mutated > 0,
+        "expected at least one edit small enough to fit under a tight max_size"
+    );
 }

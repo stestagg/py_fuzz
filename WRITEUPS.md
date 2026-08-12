@@ -10,8 +10,12 @@ Known allowed crashes include:
  - Cases where the kernel cannot allocate a stack page due to memory pressure and thus triggering a stack overflow (in a way that the built-in stack guard cannot handle).
  - Increasing the recursion limit in a way that triggers a stack overflow or memory exhaustion (documented behaviour)
  - Throwing any signal or exiting with crash-related exit codes, calling abort etc..
+ - Calling `curses.window.derwin()` or `curses.window.subwin()` with extremely
+   large coordinates or dimensions that overflow inside ncurses.
+   [cpython#140462](https://github.com/python/cpython/issues/140462) - not
+   planned.  This only applies to these two functions.
 
-Any of these cases (where confirmed) should stop all further investigation.
+Any of these cases (where confirmed) should stop all further investigation.  Be very careful to ONLY assign a crash to one of these categories if it exactly matches one of the listed scenarios, do not broaden the definitions to include a similar but different scenario.  If you are unsure, ask for a second opinion.
 
 
 ### Investigation detail
@@ -48,6 +52,9 @@ c = MyCon(':memory:')
 Now, this code is something that is far more likely to be a real user scenario, with a real user impact (and no debug or non-public build options).  Getting to that next level of relevance in a bug report is very important where possible.
 
 ### Writing up
+
+Writeups are typically stored under `writeups/` as markdown files.  Unless told otherwise, pick a representative artifact (one that's relevant to the isseu being written-up) name and use that as the filename, i.e.:
+`./writeups/repesentative-artifact-file-name.md`.  If that file already exists, unless told otherwise, add -N to the basename for the lowest unused integer value of N.
 
 Once the investigation is complete, it's important to lift this information entirely out of the fuzzing environment, tooling and terminology, and frame the bug in isolation as a standalone problem that any experienced core cpython developer should be able to understand and verify.
 

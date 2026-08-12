@@ -4,7 +4,7 @@ import type { ArtifactSummary } from "../../protocol/types";
 import { buildArtifactGroups, type ArtifactGroupNode } from "./grouping";
 import { GroupingEditor } from "./GroupingEditor";
 
-function toTreeNode(group: ArtifactGroupNode, collapsed: Set<string>, selected: string | null): TreeNodeInfo {
+function toTreeNode(group: ArtifactGroupNode, collapsed: Set<string>, selected: string | null, analyzing: string | null): TreeNodeInfo {
   return {
     id: group.id,
     icon: "folder-close",
@@ -12,10 +12,12 @@ function toTreeNode(group: ArtifactGroupNode, collapsed: Set<string>, selected: 
     secondaryLabel: <Tag minimal round>{group.count}</Tag>,
     isExpanded: !collapsed.has(group.id),
     childNodes: [
-      ...group.groups.map((child) => toTreeNode(child, collapsed, selected)),
+      ...group.groups.map((child) => toTreeNode(child, collapsed, selected, analyzing)),
       ...group.artifacts.map((artifact): TreeNodeInfo => ({
         id: `artifact:${artifact.hash}`,
-        icon: artifact.type === "core" ? "cube" : "error",
+        icon: artifact.hash === analyzing
+          ? <Spinner size={16} />
+          : artifact.type === "core" ? "cube" : "error",
         label: artifact.hash,
         isSelected: artifact.hash === selected,
         nodeData: artifact,
@@ -24,12 +26,13 @@ function toTreeNode(group: ArtifactGroupNode, collapsed: Set<string>, selected: 
   };
 }
 
-export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing, classifying, onSpecsChange, onSelect, onRefresh, onAnalyzeAll, onClassify }: {
+export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing, analyzingHash, classifying, onSpecsChange, onSelect, onRefresh, onAnalyzeAll, onClassify }: {
   artifacts: ArtifactSummary[];
   specs: string[];
   selected: string | null;
   loading: boolean;
   analyzing: boolean;
+  analyzingHash: string | null;
   classifying: boolean;
   onSpecsChange: (specs: string[]) => void;
   onSelect: (hash: string) => void;
@@ -39,8 +42,8 @@ export function ArtifactBrowser({ artifacts, specs, selected, loading, analyzing
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const contents = useMemo(
-    () => buildArtifactGroups(artifacts, specs).map((group) => toTreeNode(group, collapsed, selected)),
-    [artifacts, collapsed, selected, specs],
+    () => buildArtifactGroups(artifacts, specs).map((group) => toTreeNode(group, collapsed, selected, analyzingHash)),
+    [artifacts, analyzingHash, collapsed, selected, specs],
   );
   const setExpanded = (node: TreeNodeInfo, expanded: boolean) => {
     setCollapsed((current) => {

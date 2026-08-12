@@ -102,6 +102,15 @@ impl<'a> Visitor<'a> for NumberCollector {
     }
 }
 
+/// Every int / float literal in the module, in source order.
+fn number_sites(ctx: &AstCtx) -> Vec<NumberSite> {
+    let mut collector = NumberCollector {
+        numbers: Vec::new(),
+    };
+    walk_module(&mut collector, ctx.module);
+    collector.numbers
+}
+
 pub struct BigNum;
 
 impl BigNum {
@@ -146,13 +155,22 @@ impl SubMutator for BigNum {
         "bignum"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = NumberCollector {
-            numbers: Vec::new(),
-        };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // Per site: one pool entry, optionally negated (see `big_float`/`big_int`).
+        number_sites(ctx)
+            .iter()
+            .map(|site| {
+                if site.is_float {
+                    BIG_FLOATS.len() * 2
+                } else {
+                    (HUGE_INT_EXPRS.len() + BOUNDARY_INTS.len()) * 2
+                }
+            })
+            .sum()
+    }
 
-        let site = *rng.choose(&collector.numbers)?;
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
+        let site = *rng.choose(&number_sites(ctx))?;
         let replacement = if site.is_float {
             Self::big_float(rng)?
         } else {
@@ -210,7 +228,10 @@ mod tests {
                     replaced.contains('e') || replaced.contains('.'),
                     "seed {seed}: float not replaced by a float: {out:?}"
                 );
-                assert!(!replaced.contains("**"), "seed {seed}: got an int expr: {out:?}");
+                assert!(
+                    !replaced.contains("**"),
+                    "seed {seed}: got an int expr: {out:?}"
+                );
                 checked = true;
             }
         }
@@ -222,12 +243,16 @@ mod tests {
         let negated = (0..64u32).any(|seed| {
             run("y = 1.5\n", seed).is_some_and(|s| s.contains("(-") && s.contains('e'))
         });
-        assert!(negated, "expected a negative float replacement across seeds");
+        assert!(
+            negated,
+            "expected a negative float replacement across seeds"
+        );
     }
 
     #[test]
     fn negative_ints_appear_for_some_seed() {
-        let negated = (0..128u32).any(|seed| run("x = 5\n", seed).is_some_and(|s| s.contains("(-")));
+        let negated =
+            (0..128u32).any(|seed| run("x = 5\n", seed).is_some_and(|s| s.contains("(-")));
         assert!(negated, "expected a negative int replacement across seeds");
     }
 

@@ -401,6 +401,7 @@ dependencies = [
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_text_size",
+ "trickydata",
  "trickydata-macros",
 ]
 
@@ -677,6 +678,19 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "trickydata"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2531a6879a447f9ff61db6ce4b8217785c40ad3ce416ba40833db35c74413058"
+dependencies = [
+ "flate2",
+ "md5",
+ "serde",
+ "serde_json",
+ "trickydata-macros",
+]
 
 [[package]]
 name = "trickydata-macros"

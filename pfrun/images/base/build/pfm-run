@@ -5,6 +5,18 @@ set -u
 ulimit -Hn 4194304
 ulimit -Sn 4194304
 
+# The guest clock can boot slightly behind the host. Files on the virtiofs /pfm mount
+# carry HOST mtimes, so a lagging guest sees freshly written build files "in the
+# future" and tools like meson abort ("Clock skew detected ... N.NNNs in the future").
+# Nudge the guest clock forward by a fixed margin so it is never behind the host;
+# harmless if already ahead. No mount writes (the /pfm root rejects them), and fully
+# guarded so it can never block boot.
+pfm_sync_clock() {
+    _now=$(date +%s 2>/dev/null) || return 0
+    date -s "@$((_now + 60))" >/dev/null 2>&1 || true
+}
+pfm_sync_clock 2>/dev/null
+
 BLUE='\033[34m'
 GREEN='\033[32m'
 RED='\033[31m'

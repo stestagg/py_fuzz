@@ -134,7 +134,7 @@ def _launch_and_wait_for_crash(lldb, debugger, target, input_path: str = None, a
 
 
 def analyze_crash(lldb, debugger, target, input_path: str, envp=None, commands=None) -> str:
-    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp)
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp=envp)
     if err:
         return err
 
@@ -149,7 +149,7 @@ def analyze_crash(lldb, debugger, target, input_path: str, envp=None, commands=N
 
 def interactive_crash(lldb, debugger, target, input_path: str, envp=None) -> None:
     """Launch the target, wait for the crash, then start an interactive session."""
-    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp)
+    process, err = _launch_and_wait_for_crash(lldb, debugger, target, input_path, envp=envp)
     if err:
         print(err, file=sys.stderr)
         return

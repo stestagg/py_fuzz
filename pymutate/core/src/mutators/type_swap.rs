@@ -130,6 +130,15 @@ impl<'a> Visitor<'a> for LiteralCollector {
     }
 }
 
+/// Every literal in the module paired with its kind, in source order.
+fn literal_sites(ctx: &AstCtx) -> Vec<(TextRange, LitKind)> {
+    let mut collector = LiteralCollector {
+        literals: Vec::new(),
+    };
+    walk_module(&mut collector, ctx.module);
+    collector.literals
+}
+
 pub struct TypeSwap {
     candidates: Vec<Candidate>,
 }
@@ -153,14 +162,22 @@ impl SubMutator for TypeSwap {
         "type_swap"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = LiteralCollector {
-            literals: Vec::new(),
-        };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // Only candidates of a *different* kind are legal swaps, so count per site.
+        literal_sites(ctx)
+            .iter()
+            .map(|(_, src_kind)| {
+                self.candidates
+                    .iter()
+                    .filter(|cand| cand.kind != Some(*src_kind))
+                    .count()
+            })
+            .sum()
+    }
 
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
         // Pick one literal node and note its kind.
-        let (range, src_kind) = *rng.choose(&collector.literals)?;
+        let (range, src_kind) = *rng.choose(&literal_sites(ctx))?;
 
         // Scan the candidate pool from a random offset for one whose kind
         // differs (untagged candidates count as different). Seeded, and never a

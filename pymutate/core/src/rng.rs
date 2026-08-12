@@ -35,12 +35,31 @@ impl Rng {
         self.index(items.len()).map(|i| &items[i])
     }
 
-    /// In-place Fisher–Yates shuffle (used to visit sub-mutators in a random
-    /// order without allocating a new collection).
-    pub fn shuffle<T>(&mut self, items: &mut [T]) {
-        for i in (1..items.len()).rev() {
-            let j = self.inner.gen_range(0..=i);
-            items.swap(i, j);
+    /// Pick an index with probability proportional to `weights[i]`. Zero-weight
+    /// entries are never chosen; `None` when every weight is zero (or empty).
+    pub fn weighted_index(&mut self, weights: &[usize]) -> Option<usize> {
+        let total: usize = weights.iter().sum();
+        let mut pick = self.index(total)?;
+        for (i, &w) in weights.iter().enumerate() {
+            if pick < w {
+                return Some(i);
+            }
+            pick -= w;
         }
+        // Unreachable: `pick < total` and the weights sum to `total`.
+        None
+    }
+
+    /// Draw `1..=max` with a halving distribution: 1 half the time, 2 a quarter
+    /// of the time, and so on, with the tail collected at `max`.
+    ///
+    /// Used for the number of edits to stack, so the common case stays a single
+    /// attributable edit while deeper combinations still get sampled.
+    pub fn geometric(&mut self, max: usize) -> usize {
+        let mut n = 1;
+        while n < max && self.index(2) == Some(0) {
+            n += 1;
+        }
+        n
     }
 }

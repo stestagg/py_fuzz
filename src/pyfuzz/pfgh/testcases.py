@@ -33,6 +33,11 @@ CRITICAL: fuzzing relies on a crash being an actionable outcome.  This means it'
  - call pickle/cpickle with input-defined data
  - adjust rlimits or other resource/process settings, unless the risk of causing a false-positive or poisioning the process is tiny. (remmeber the fuzzer will be trying to alter inputs to break things)
 
+At the moment, there is a lot of 'free threaded' change happening.  These changes relate to a new python
+execution mode that is NOT BEING FUZZED, do not try to generate inputs using threads because the change
+relates to free-threaded builds. It's ok to generate inputs that excercise the affected code,
+but without using threading.
+
  If PR is directly related to any of the above critical aviod areas, and there is no 
  safe alternative codepath to explore, then skip the PR and return an empty list of inputs.
 

@@ -33,6 +33,15 @@ async def make_dict(project: Project) -> int:
         line = line[1:-1]
         entries.add(line.strip())
 
+    # Keep Sphinx-derived and package-derived identifier candidates when the
+    # combined dictionary is regenerated after later build stages.
+    names_file = project.path('py', 'pymutate_names.txt')
+    if names_file.exists():
+        for line in names_file.read_bytes().splitlines():
+            line = line.strip()
+            if line:
+                entries.add(line)
+
     output = []
     for entry in sorted(entries):
         if entry.strip():

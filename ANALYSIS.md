@@ -1,7 +1,7 @@
 # Crash Analysis Tooling
 
 ** IF YOU'RE CODEX ** Please use `uv` where needed, BUT you may need to set the uv cache directory to a path your sandbox allows you to use (temp dir?)
-If you do hit any other sandbox issues, talk to the user for help resolving them.
+If you do hit any other sandbox issues, talk to the user for help resolving them.  Also you may have issues with nested virtualization.
 
 This document describes the local `./pfx` / `./pyfuzz` tooling that is relevant
 when a fuzzing run leaves behind crash files, core files, and difficult
@@ -34,7 +34,8 @@ It can contain:
 - `meta.json`: type, timestamp, worker, and source AFL filename
 - `input.txt`: the copied crash input
 - `lldb.txt`: LLDB output, if analysis has been run
-- other named analysis outputs produced by `analyze script`
+- `reproducer.py`: The result of a comprehensive input reduction process that captures all previous inputs and finds the minimal input that reproduces the crash. This is only present if the relevant minimization and tracking has been done.
+- other named analysis outputs produced by `analyze script` or any other tools.
 
 A core artifact represents a core file found under:
 

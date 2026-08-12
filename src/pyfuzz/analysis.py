@@ -207,6 +207,39 @@ def _parse_core_pid(name: str) -> int | None:
     return None
 
 
+# The kernel's OOM killer logs two lines per victim, e.g.
+#   [ 5669.837840] oom-kill:...,task=fuzz_python,pid=16747,uid=0
+#   [ 5669.837893] Out of memory: Killed process 16747 (fuzz_python) total-vm:...
+# The "Killed process" summary carries the RSS/vm figures, so we prefer it.
+_OOM_KILL_RE = re.compile(r"oom-kill:.*\bpid=(\d+)")
+_OOM_VICTIM_RE = re.compile(r"Out of memory: Killed process (\d+)\b")
+
+
+def _find_oom_kill(kernel_log: Path, pid: int) -> str | None:
+    """Return the kernel OOM-kill log line for ``pid`` if it was OOM-killed.
+
+    Scans ``kernel_log`` for the worker and returns the "Out of memory: Killed
+    process <pid> ..." summary line (which includes the victim's memory usage).
+    Falls back to the terser "oom-kill:" line if the summary is absent, and
+    returns None if the log is missing or the pid was never an OOM victim.
+    """
+    if not kernel_log.exists():
+        return None
+    try:
+        text = kernel_log.read_text(errors="replace")
+    except OSError:
+        return None
+    oom_line: str | None = None
+    for line in text.splitlines():
+        m = _OOM_VICTIM_RE.search(line)
+        if m and int(m.group(1)) == pid:
+            return line.strip()
+        m = _OOM_KILL_RE.search(line)
+        if m and int(m.group(1)) == pid:
+            oom_line = line.strip()
+    return oom_line
+
+
 def _create_artifact(artifact_dir: Path, source: Path, atype: ArtifactType) -> None:
     artifact_dir.mkdir(exist_ok=True)
     meta: dict = {"type": atype.value}
@@ -310,7 +343,7 @@ def get_artifact(project: Project, hash: str) -> Artifact:
 # with already-analyzed artifacts (renaming it would force a re-analysis of
 # every existing core). It marks any artifact as analyzed, not just cores.
 ANALYZE_MARKER_FILE = "analyze-core.marker"
-ANALYZE_MARKER_VERSION = "v2"
+ANALYZE_MARKER_VERSION = "v3"
 
 def is_artifact_analyzed(artifact: Artifact) -> bool:
     """True if the artifact has already been analyzed at the current version."""
@@ -392,6 +425,19 @@ async def analyze_artifact(project: Project, artifact_hash: str, *, force: bool 
 
     if pid is not None and worker is not None:
         await _attach_harness_output(project, artifact, pid, worker)
+
+    # Flag OOM-kills: a status-9 (SIGKILL) crash is often the kernel reaping the
+    # worker for memory, not a genuine interpreter fault. Record the kernel line
+    # so downstream triage can tell the two apart.
+    if pid is not None and worker is not None:
+        kernel_log = project.path("logs") / worker / "kernel.log"
+        oom_line = await asyncio.to_thread(_find_oom_kill, kernel_log, pid)
+        if oom_line is not None:
+            current_meta = json.loads((artifact.dir / "meta.json").read_text())
+            current_meta["oom_killed"] = True
+            current_meta["oom_kill_line"] = oom_line
+            (artifact.dir / "meta.json").write_text(json.dumps(current_meta, indent=2))
+            artifact._meta = None
 
     marker_path.write_text(ANALYZE_MARKER_VERSION)
 

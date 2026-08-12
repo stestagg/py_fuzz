@@ -41,14 +41,26 @@ impl<'a> SourceOrderVisitor<'a> for NameCollector {
     }
 }
 
+/// Every identifier position in the module: `Name` expressions plus bare
+/// [`Identifier`] nodes (attributes, keyword args, def/class names, …).
+fn identifier_ranges(ctx: &AstCtx) -> Vec<TextRange> {
+    let mut collector = NameCollector { ranges: Vec::new() };
+    walk_module(&mut collector, ctx.module);
+    collector.ranges
+}
+
 pub struct NameSubstitution {
-    candidates: Vec<&'static str>,
+    candidates: Vec<String>,
 }
 
 impl NameSubstitution {
     pub fn new() -> Self {
+        Self::with_extra_names(&[])
+    }
+
+    pub fn with_extra_names(extra_names: &[String]) -> Self {
         Self {
-            candidates: load_name_dict(),
+            candidates: load_name_dict(extra_names),
         }
     }
 }
@@ -64,12 +76,13 @@ impl SubMutator for NameSubstitution {
         "name_subst"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = NameCollector { ranges: Vec::new() };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        identifier_ranges(ctx).len() * self.candidates.len()
+    }
 
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
         // Pick one Name node.
-        let range = *rng.choose(&collector.ranges)?;
+        let range = *rng.choose(&identifier_ranges(ctx))?;
         let start = usize::from(range.start());
         let end = usize::from(range.end());
         let current = &ctx.source[start..end];
@@ -79,12 +92,12 @@ impl SubMutator for NameSubstitution {
         let n = self.candidates.len();
         let start_idx = rng.index(n)?;
         for k in 0..n {
-            let cand = self.candidates[(start_idx + k) % n];
+            let cand = &self.candidates[(start_idx + k) % n];
             if cand != current {
                 return Some(Edit {
                     range,
                     kind: "name_subst",
-                    replacement: cand.to_string(),
+                    replacement: cand.clone(),
                 });
             }
         }

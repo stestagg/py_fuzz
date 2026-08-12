@@ -216,6 +216,16 @@ impl<'a> Visitor<'a> for OpCollector<'a> {
     }
 }
 
+/// Every locatable operator token in the module, in source order.
+fn op_sites(ctx: &AstCtx) -> Vec<OpSite> {
+    let mut collector = OpCollector {
+        source: ctx.source,
+        sites: Vec::new(),
+    };
+    walk_module(&mut collector, ctx.module);
+    collector.sites
+}
+
 pub struct OperatorSwap {
     candidates: Vec<Candidate>,
 }
@@ -239,15 +249,23 @@ impl SubMutator for OperatorSwap {
         "operator_swap"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = OpCollector {
-            source: ctx.source,
-            sites: Vec::new(),
-        };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // Only same-family candidates are legal swaps, so count per site.
+        op_sites(ctx)
+            .iter()
+            .map(|site| {
+                self.candidates
+                    .iter()
+                    .filter(|cand| cand.family == site.family)
+                    .count()
+            })
+            .sum()
+    }
 
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
         // Pick one operator site and note its current token + family.
-        let site = rng.choose(&collector.sites)?;
+        let sites = op_sites(ctx);
+        let site = rng.choose(&sites)?;
         let start = usize::from(site.range.start());
         let end = usize::from(site.range.end());
         let current = &ctx.source[start..end];

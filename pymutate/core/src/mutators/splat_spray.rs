@@ -80,6 +80,23 @@ impl<'a> SourceOrderVisitor<'a> for SplatCollector {
     }
 }
 
+/// The two anchor pools: offsets where a `*`/`**` prefix can go, and offsets
+/// where a splatted element can be appended to a list/tuple display.
+///
+/// Prefix anchors are deduplicated — several nodes often start at the same
+/// offset (a statement and its first expression), and counting those repeatedly
+/// would over-weight the position.
+fn splat_sites(ctx: &AstCtx) -> (Vec<TextSize>, Vec<TextSize>) {
+    let mut collector = SplatCollector {
+        prefixes: Vec::new(),
+        appends: Vec::new(),
+    };
+    walk_module(&mut collector, ctx.module);
+    collector.prefixes.sort_unstable();
+    collector.prefixes.dedup();
+    (collector.prefixes, collector.appends)
+}
+
 pub struct SplatSpray;
 
 impl SplatSpray {
@@ -99,27 +116,22 @@ impl SubMutator for SplatSpray {
         "splat_spray"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = SplatCollector {
-            prefixes: Vec::new(),
-            appends: Vec::new(),
-        };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        let (prefixes, appends) = splat_sites(ctx);
+        prefixes.len() * PREFIXES.len() + appends.len() * APPENDS.len()
+    }
 
-        // Distinct prefix anchors only, so positions where several nodes start at
-        // the same offset (e.g. a statement and its first expression) aren't
-        // over-weighted.
-        collector.prefixes.sort_unstable();
-        collector.prefixes.dedup();
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
+        let (prefixes, appends) = splat_sites(ctx);
 
         // One flat candidate space: each prefix anchor offers `*` and `**`; each
         // container anchor offers `*[1]` and `**{'x': 1}`. Pick one uniformly.
-        let n_prefix = collector.prefixes.len() * PREFIXES.len();
-        let n_append = collector.appends.len() * APPENDS.len();
+        let n_prefix = prefixes.len() * PREFIXES.len();
+        let n_append = appends.len() * APPENDS.len();
         let idx = rng.index(n_prefix + n_append)?;
 
         if idx < n_prefix {
-            let offset = collector.prefixes[idx / PREFIXES.len()];
+            let offset = prefixes[idx / PREFIXES.len()];
             let replacement = PREFIXES[idx % PREFIXES.len()].to_string();
             Some(Edit {
                 range: TextRange::empty(offset),
@@ -128,7 +140,7 @@ impl SubMutator for SplatSpray {
             })
         } else {
             let j = idx - n_prefix;
-            let offset = collector.appends[j / APPENDS.len()];
+            let offset = appends[j / APPENDS.len()];
             let replacement = APPENDS[j % APPENDS.len()].to_string();
             Some(Edit {
                 range: TextRange::empty(offset),
@@ -154,7 +166,10 @@ mod tests {
         for seed in 0..64u32 {
             if let Some(out) = run("[a, b]\n", seed) {
                 assert!(out.contains('*'), "seed {seed}: no splat inserted: {out:?}");
-                assert!(out.len() > "[a, b]\n".len(), "seed {seed}: not an insertion");
+                assert!(
+                    out.len() > "[a, b]\n".len(),
+                    "seed {seed}: not an insertion"
+                );
             }
         }
     }

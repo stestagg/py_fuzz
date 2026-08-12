@@ -85,11 +85,13 @@ def shell(ctx, pfrun, docker, image, cmd, dmesg):
 
 @cli.command("build")
 @click.option('--py', 'build_py', is_flag=True, help="Build Python")
+@click.option('--packages', 'build_packages', is_flag=True, help="Build third-party packages")
 @click.option('--helpers', 'build_helpers', is_flag=True, help="Build Helpers")
 @click.pass_context
-def build(ctx, build_py, build_helpers):
-    if not build_py and not build_helpers:
+def build(ctx, build_py, build_packages, build_helpers):
+    if not build_py and not build_packages and not build_helpers:
         build_py = True
+        build_packages = True
         build_helpers = True
 
     click.echo(f"Building project: {ctx.obj['project']}")
@@ -97,6 +99,11 @@ def build(ctx, build_py, build_helpers):
     if build_py:
         from .build import build_python
         asyncio.run(build_python(project))
+    # Packages install into the interpreter, so they follow the Python build and
+    # precede the harness link (which reserves the coverage map covering them).
+    if build_py or build_packages:
+        from .build import build_packages as _build_packages
+        asyncio.run(_build_packages(project))
     if build_helpers:
         from .build import build_helpers
         asyncio.run(build_helpers(project))

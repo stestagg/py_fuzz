@@ -54,9 +54,27 @@ def is_blacklisted(sofile) -> bool:
 
 def so_files(project):
     dist_dir = project.path("py")
-    so_files = [p.relative_to(dist_dir) for p in dist_dir.glob("lib/python*/lib-dynload/*.so") if not is_blacklisted(p)]
+    globs = [
+        "lib/python*/lib-dynload/*.so",
+        "lib/python*/site-packages/**/*.so",
+        # Bundled shared libraries with versioned sonames (e.g. pyarrow's
+        # libarrow.so.NNNN / libparquet.so.NNNN under site-packages/pyarrow/).
+        "lib/python*/site-packages/**/*.so.*",
+    ]
+    seen = set()
+    so_files = []
+    for pattern in globs:
+        for p in dist_dir.glob(pattern):
+            if is_blacklisted(p) or p in seen:
+                continue
+            seen.add(p)
+            so_files.append(p.relative_to(dist_dir))
     return ":".join(f'/pfm/py/{p}' for p in so_files)
 
+
+def warmup_imports(project):
+    from .packages import warmup_import_names
+    return ",".join(warmup_import_names(project))
 
 
 def load_image_vars(env: Env) -> dict[str, str]:
@@ -68,7 +86,12 @@ def load_image_vars(env: Env) -> dict[str, str]:
         return {}
     
     template = jinja2.Template(vars_file.read_text())
-    rendered = template.render(env=env, project=env.project, so_files=partial(so_files, env.project))
+    rendered = template.render(
+        env=env,
+        project=env.project,
+        so_files=partial(so_files, env.project),
+        warmup_imports=partial(warmup_imports, env.project),
+    )
 
     lines = rendered.splitlines()
     vars = {}
@@ -144,6 +167,9 @@ class Env:
             mounts.append((root_path("tactical-patches"), False))
             mounts.append((self.project.path("py"), True))
             mounts.append((self.project.path("cpython"), True))
+            packages_dir = self.project.path("packages")
+            packages_dir.mkdir(exist_ok=True)
+            mounts.append((packages_dir, True))
             mounts.append((self.project.path('tools'), True))
             mounts.append((root_path("cache"), True))
         

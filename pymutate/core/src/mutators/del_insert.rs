@@ -70,6 +70,19 @@ impl<'a> Visitor<'a> for AssignCollector {
     }
 }
 
+/// Assignment sites usable for a spliced `del`, each paired with the indent its
+/// new sibling statement needs. Sites whose statement doesn't lead its line are
+/// dropped — see [`line_indent`].
+fn del_sites<'a>(ctx: &AstCtx<'a>) -> Vec<(AssignSite, &'a str)> {
+    let mut collector = AssignCollector { sites: Vec::new() };
+    walk_module(&mut collector, ctx.module);
+    collector
+        .sites
+        .iter()
+        .filter_map(|s| line_indent(ctx.source, usize::from(s.stmt.start())).map(|ind| (*s, ind)))
+        .collect()
+}
+
 pub struct DelInsert;
 
 impl DelInsert {
@@ -89,27 +102,21 @@ impl SubMutator for DelInsert {
         "del_insert"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = AssignCollector { sites: Vec::new() };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // The `del` text is fixed by the target, so each site offers exactly the
+        // two placements.
+        del_sites(ctx).len() * PLACEMENTS.len()
+    }
 
-        // Keep only sites whose statement leads its line, pairing each with its
-        // indent so the spliced `del` lines up. (See `line_indent`.)
-        let usable: Vec<(AssignSite, &str)> = collector
-            .sites
-            .iter()
-            .filter_map(|s| {
-                line_indent(ctx.source, usize::from(s.stmt.start())).map(|ind| (*s, ind))
-            })
-            .collect();
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
+        let usable = del_sites(ctx);
 
         // One flat candidate space: each usable site offers before/after.
         let idx = rng.index(usable.len() * PLACEMENTS.len())?;
         let (site, indent) = usable[idx / PLACEMENTS.len()];
         let placement = PLACEMENTS[idx % PLACEMENTS.len()];
 
-        let target =
-            &ctx.source[usize::from(site.target.start())..usize::from(site.target.end())];
+        let target = &ctx.source[usize::from(site.target.start())..usize::from(site.target.end())];
 
         let (range, replacement) = match placement {
             Placement::After => (
@@ -163,7 +170,8 @@ mod tests {
     #[test]
     fn tuple_target_deletes_the_whole_target() {
         // `a, b = 1, 2` → the del uses the target's source text: `del a, b`.
-        let hit = (0..64u32).any(|seed| run("a, b = 1, 2\n", seed).is_some_and(|s| s.contains("del a, b")));
+        let hit = (0..64u32)
+            .any(|seed| run("a, b = 1, 2\n", seed).is_some_and(|s| s.contains("del a, b")));
         assert!(hit, "expected `del a, b` for a tuple target");
     }
 

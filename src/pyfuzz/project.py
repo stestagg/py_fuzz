@@ -1,6 +1,6 @@
 
 from pathlib import Path
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from . import paths
 
@@ -26,6 +26,7 @@ class Project:
     fuzz_env: tuple[str] = ()
     track_inputs: bool = True
     crash_on_memory_error: bool = False
+    packages: dict[str, str] = field(default_factory=dict)
 
     _name: str = None
 
@@ -80,7 +81,7 @@ class Project:
         config_path = root / "config" / "project.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text("{}")
-        skel_dirs = ['py', 'cpython', 'inputs', 'outputs', 'cores', 'artifacts', 'logs', 'tools', 'envs', 'scratch']
+        skel_dirs = ['py', 'cpython', 'packages', 'inputs', 'outputs', 'cores', 'artifacts', 'logs', 'tools', 'envs', 'scratch']
         for d in skel_dirs:
             (root / d).mkdir()
         return cls.load(name)

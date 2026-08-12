@@ -48,14 +48,25 @@ impl<'a> Visitor<'a> for CallCollector {
     }
 }
 
+/// Every call site in the module, in source order.
+fn call_sites(ctx: &AstCtx) -> Vec<CallSite> {
+    let mut collector = CallCollector { calls: Vec::new() };
+    walk_module(&mut collector, ctx.module);
+    collector.calls
+}
+
 pub struct ArgSpray {
-    args: Vec<&'static str>,
+    args: Vec<String>,
 }
 
 impl ArgSpray {
     pub fn new() -> Self {
+        Self::with_extra_names(&[])
+    }
+
+    pub fn with_extra_names(extra_names: &[String]) -> Self {
         Self {
-            args: load_name_dict(),
+            args: load_name_dict(extra_names),
         }
     }
 }
@@ -71,16 +82,17 @@ impl SubMutator for ArgSpray {
         "arg_spray"
     }
 
-    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = CallCollector { calls: Vec::new() };
-        walk_module(&mut collector, ctx.module);
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        call_sites(ctx).len() * self.args.len()
+    }
 
-        let site = *rng.choose(&collector.calls)?;
-        let arg = *rng.choose(&self.args)?;
+    fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
+        let site = *rng.choose(&call_sites(ctx))?;
+        let arg = rng.choose(&self.args)?;
         let replacement = if site.has_args {
             format!(", {arg}")
         } else {
-            arg.to_string()
+            arg.clone()
         };
 
         Some(Edit {
@@ -119,7 +131,10 @@ mod tests {
         // `f()` → `f(<name>)` — no leading comma.
         for seed in 0..32u32 {
             if let Some(out) = run("f()\n", seed) {
-                assert!(out.starts_with("f(") && !out.starts_with("f(,"), "seed {seed}: {out:?}");
+                assert!(
+                    out.starts_with("f(") && !out.starts_with("f(,"),
+                    "seed {seed}: {out:?}"
+                );
                 assert!(out.len() > "f()\n".len(), "seed {seed}: not an insertion");
                 assert!(
                     ruff_python_parser::parse_module(&out).is_ok(),

@@ -19,6 +19,9 @@ ruff_python_ast = { workspace = true }
 ruff_text_size = { workspace = true }
 rand = "0.8"
 trickydata-macros = "*"
+# `static_examples!` expands to `::trickydata::StaticExample` / `::trickydata::DecodeAs`,
+# so the runtime crate must be in scope even though we only read its static shapes.
+trickydata = "*"
 
 [dev-dependencies]
 # The `corpus` integration test reparses mutator output to assert type-swap

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from pyfuzz.build import build_helpers, build_python
+from pyfuzz.build import build_helpers, build_packages, build_python
 from pyfuzz.clean import CleanComponent, clean
 from pyfuzz.fuzz import run_fuzz
 from pyfuzz.fuzzdict import make_dict
@@ -45,6 +45,8 @@ async def fuzz_action(project: Project, instances: int, afl_debug: bool, monitor
 async def build_action(project: Project, target: str) -> None:
     if target in ("all", "py"):
         await build_python(project)
+    if target in ("all", "py", "packages"):
+        await build_packages(project)
     if target in ("all", "helpers"):
         await build_helpers(project)
     await make_dict(project)

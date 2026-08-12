@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from pyfuzz.analysis import analyze_artifact, get_artifact, is_artifact_analyzed, list_artifacts, sync_artifacts
-from pyfuzz.build import build_helpers, build_python
+from pyfuzz.build import build_helpers, build_packages, build_python
 from pyfuzz.build_progress import median_total
 from pyfuzz.clean import CleanComponent, clean
 from pyfuzz.fuzz import run_fuzz
@@ -222,13 +223,20 @@ async def artifact_analyze(context: RequestContext, project: Project | None, par
 @router.handler("artifacts.analyze")
 async def artifacts_analyze(context: RequestContext, project: Project | None, params: EmptyParams) -> Any:
     assert project is not None
+    reporter = ProgressReporter()
 
     async def analyze_all() -> int:
         # Cores and crashes are both artifacts; analyze every one that has not
         # been analyzed yet, regardless of type. analyze_artifact dispatches to
         # the right per-type analysis internally.
         pending = [a for a in await list_artifacts(project) if not is_artifact_analyzed(a)]
-        for artifact in pending:
+        started = time.monotonic()
+        for index, artifact in enumerate(pending):
+            elapsed = time.monotonic() - started
+            eta = elapsed / index * (len(pending) - index) if index else 0.0
+            # Phase carries the hash of the artifact under analysis so the UI
+            # can highlight it in the artifact tree.
+            reporter.emit(index / len(pending), eta, artifact.hash)
             await analyze_artifact(project, artifact.hash)
         return len(pending)
 
@@ -242,6 +250,7 @@ async def artifacts_analyze(context: RequestContext, project: Project | None, pa
         project.name,
         analyze_all(),
         exclusive_key=f"analyze-all:{project.name}",
+        progress_reporter=reporter,
     )
     return {"started": True}
 
@@ -384,7 +393,11 @@ async def _fuzz_action(project: Project, instances: int, afl_debug: bool, monito
 
 
 async def _build_action(project: Project, target: str, on_progress=None) -> None:
-    stages = [s for s, keys in (("py", {"all", "py"}), ("helpers", {"all", "helpers"})) if target in keys]
+    stage_keys = (("py", {"all", "py"}), ("packages", {"all", "py", "packages"}), ("helpers", {"all", "helpers"}))
+    stages = [s for s, keys in stage_keys if target in keys]
+    # A no-op packages stage (none configured) would stall the bar; drop it.
+    if "packages" in stages and not project.packages:
+        stages.remove("packages")
 
     # Combine the stages into one continuous 0..1 bar, weighted by their
     # historical durations (fall back to py-dominant weights without history).
@@ -393,7 +406,7 @@ async def _build_action(project: Project, target: str, on_progress=None) -> None
         grand = sum(totals.values())
         weights = {s: totals[s] / grand for s in stages}
     else:
-        default = {"py": 0.9, "helpers": 0.1}
+        default = {"py": 0.8, "packages": 0.15, "helpers": 0.05}
         norm = sum(default[s] for s in stages)
         weights = {s: default[s] / norm for s in stages}
     offsets: dict[str, float] = {}
@@ -412,6 +425,8 @@ async def _build_action(project: Project, target: str, on_progress=None) -> None
 
     if "py" in stages:
         await build_python(project, wrap("py"))
+    if "packages" in stages:
+        await build_packages(project, wrap("packages"))
     if "helpers" in stages:
         await build_helpers(project, wrap("helpers"))
     await make_dict(project)

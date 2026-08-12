@@ -34,8 +34,18 @@ if [ -d /pfm/tactical-patches ]; then
                 continue
                 ;;
         esac
-        git apply "$_patch"
-        echo "Applied tactical patch: $_patch"
+        if git apply --check "$_patch"; then
+            git apply "$_patch"
+            echo "Applied tactical patch: $_patch"
+        elif git apply --reverse --check "$_patch"; then
+            # The checkout is mounted read-write, so a failed build may leave
+            # tactical changes behind.  Treat an already-applied patch as a
+            # no-op so retries can continue from that checkout.
+            echo "Tactical patch already applied: $_patch"
+        else
+            echo "Could not apply tactical patch: $_patch" >&2
+            exit 1
+        fi
     done
 fi
 
@@ -65,6 +75,15 @@ fi
 sed -i 's|^\(\$(BUILDPYTHON):[[:space:]]*Programs/python\.o[[:space:]]\+\$(LINK_PYTHON_DEPS)\)|\1 $(SHAREDMODS)|' Makefile
 
 make -j1 install
+
+# Use the freshly-built interpreter to introspect its own standard library and
+# emit mutation and AFL dictionary candidates: builtin names, stdlib module
+# names, and their members (e.g. ``fileinput`` -> ``fileinput``, ``nextfile``).
+# This runs entirely offline; the previous Sphinx-inventory approach needed
+# network access to create the documentation venv.
+"$INSTALL_ROOT/bin/python3" /pfm/build_scripts/generate_pymutate_names.py \
+    "$INSTALL_ROOT/pymutate_names.txt" \
+    "$INSTALL_ROOT/combined.dict"
 
 if [ $PY_FUZZ_CMPLOG = "1" ]; then
 

@@ -88,6 +88,36 @@ class StackFaultClassificationTests(unittest.TestCase):
             any("unmapped hole" in signal for signal in analysis.signals)
         )
 
+    def test_unmapped_stack_pointer_region_is_strong_signal(self) -> None:
+        text = "\n".join(
+            [
+                "* thread #1: stop reason = SIGSEGV: address not mapped to object "
+                "(fault address=0xfffffffccff0)",
+                "(lldb) bt all",
+                "* frame #0: python`_Py_Dealloc(op=0xaaaaadc9c270) at object.c:3291",
+                "(lldb) register read",
+                "        sp = 0x0000fffffffccfe0",
+                "(lldb) memory region $sp",
+                "[0x0000fffffffccfe0-0x0000fffffffcd000) ---",
+                "(lldb) memory region 0xfffffffccff0",
+                "[0x0000fffffffccff0-0x0000fffffffcd000) ---",
+            ]
+        )
+
+        analysis = classify_lldb_stack_fault(text)
+
+        self.assertEqual(analysis.classification, "likely")
+        self.assertGreaterEqual(analysis.score, 10)
+        self.assertTrue(
+            any("stack pointer is in an unmapped memory region" in signal for signal in analysis.signals)
+        )
+        self.assertTrue(
+            any("same unmapped memory region" in signal for signal in analysis.signals)
+        )
+        self.assertTrue(
+            any("process stopped on SIGSEGV/SIGBUS" in signal for signal in analysis.signals)
+        )
+
     def test_memory_region_starting_at_zero_is_null_deref(self) -> None:
         text = "\n".join(
             [

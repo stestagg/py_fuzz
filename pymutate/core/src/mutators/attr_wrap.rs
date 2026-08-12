@@ -42,18 +42,29 @@ impl<'a> Visitor<'a> for NameRefCollector {
     }
 }
 
+/// Every `Name` reference in the module, in source order.
+fn name_refs(ctx: &AstCtx) -> Vec<TextRange> {
+    let mut collector = NameRefCollector { ranges: Vec::new() };
+    walk_module(&mut collector, ctx.module);
+    collector.ranges
+}
+
 pub struct AttrWrap {
-    attrs: Vec<&'static str>,
+    attrs: Vec<String>,
 }
 
 impl AttrWrap {
     pub fn new() -> Self {
+        Self::with_extra_names(&[])
+    }
+
+    pub fn with_extra_names(extra_names: &[String]) -> Self {
         // The dict carries the keyword constants `None`/`True`/`False` (fine as a
         // whole-name substitution, but `x.True` is a syntax error) — drop them so
         // every wrap yields a legal attribute name.
-        let attrs = load_name_dict()
+        let attrs = load_name_dict(extra_names)
             .into_iter()
-            .filter(|c| !matches!(*c, "None" | "True" | "False"))
+            .filter(|c| !matches!(c.as_str(), "None" | "True" | "False"))
             .collect();
         Self { attrs }
     }
@@ -70,18 +81,20 @@ impl SubMutator for AttrWrap {
         "attr_wrap"
     }
 
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        name_refs(ctx).len() * SHAPES.len() * self.attrs.len()
+    }
+
     fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut collector = NameRefCollector { ranges: Vec::new() };
-        walk_module(&mut collector, ctx.module);
+        let ranges = name_refs(ctx);
 
         // One flat candidate space: each Name offers both wrap shapes. Pick one.
-        let n = collector.ranges.len() * SHAPES.len();
-        let idx = rng.index(n)?;
-        let range = collector.ranges[idx / SHAPES.len()];
+        let idx = rng.index(ranges.len() * SHAPES.len())?;
+        let range = ranges[idx / SHAPES.len()];
         let shape = SHAPES[idx % SHAPES.len()];
 
         let name = &ctx.source[usize::from(range.start())..usize::from(range.end())];
-        let attr = *rng.choose(&self.attrs)?;
+        let attr = rng.choose(&self.attrs)?;
         let replacement = shape.replace("{name}", name).replace("{attr}", attr);
 
         Some(Edit {

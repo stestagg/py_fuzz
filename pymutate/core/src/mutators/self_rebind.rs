@@ -41,6 +41,29 @@ impl<'a> Visitor<'a> for Collector {
     }
 }
 
+/// Every rebind candidate: a name, its smallest enclosing line-leading
+/// statement (where the rebind is anchored), and that statement's indent.
+fn rebind_sites<'a>(ctx: &AstCtx<'a>) -> Vec<(TextRange, TextRange, &'a str)> {
+    let mut c = Collector {
+        stmts: Vec::new(),
+        names: Vec::new(),
+    };
+    walk_module(&mut c, ctx.module);
+
+    c.names
+        .iter()
+        .filter_map(|&nr| {
+            let stmt = c
+                .stmts
+                .iter()
+                .filter(|s| s.start() <= nr.start() && nr.end() <= s.end())
+                .min_by_key(|s| s.len())?;
+            let indent = line_indent(ctx.source, usize::from(stmt.start()))?;
+            Some((nr, *stmt, indent))
+        })
+        .collect()
+}
+
 pub struct SelfRebind;
 
 impl SelfRebind {
@@ -60,30 +83,13 @@ impl SubMutator for SelfRebind {
         "self_rebind"
     }
 
+    fn edit_space(&self, ctx: &AstCtx) -> usize {
+        // The rebind text is fixed by the name, so each site yields one edit.
+        rebind_sites(ctx).len()
+    }
+
     fn mutate(&self, ctx: &AstCtx, rng: &mut Rng) -> Option<Edit> {
-        let mut c = Collector {
-            stmts: Vec::new(),
-            names: Vec::new(),
-        };
-        walk_module(&mut c, ctx.module);
-
-        // Each candidate: a name paired with its smallest line-leading enclosing
-        // statement (where we anchor the rebind).
-        let candidates: Vec<(TextRange, TextRange, &str)> = c
-            .names
-            .iter()
-            .filter_map(|&nr| {
-                let stmt = c
-                    .stmts
-                    .iter()
-                    .filter(|s| s.start() <= nr.start() && nr.end() <= s.end())
-                    .min_by_key(|s| s.len())?;
-                let indent = line_indent(ctx.source, usize::from(stmt.start()))?;
-                Some((nr, *stmt, indent))
-            })
-            .collect();
-
-        let &(nr, stmt, indent) = rng.choose(&candidates)?;
+        let &(nr, stmt, indent) = rng.choose(&rebind_sites(ctx))?;
         let name = &ctx.source[usize::from(nr.start())..usize::from(nr.end())];
 
         Some(Edit {

@@ -16,6 +16,7 @@ _MEM_REGION_BLOCK_RE = re.compile(
     r"\(lldb\) memory region (\S+)\n(.*?)(?=\n\(lldb\)|\Z)", re.DOTALL
 )
 _REGION_RANGE_RE = re.compile(r"\[0x([0-9a-fA-F]+)-0x([0-9a-fA-F]+)\)\s*([a-zA-Z-]*)")
+_SEGFAULT_RE = re.compile(r"stop reason = (?:signal )?SIG(?:SEGV|BUS)\b")
 
 # Small offsets off a NULL pointer (e.g. a NULL-checked struct field access)
 # fault at low addresses like 0x9, 0x18, 0x30 ... These are never a stack
@@ -78,7 +79,7 @@ def classify_lldb_stack_fault(lldb_text: str) -> StackFaultAnalysis:
     # that argue against a stack fault regardless of score.
     signals: list[tuple[bool, str]] = []
 
-    if "stop reason = signal SIGSEGV" in text or "stop reason = signal SIGBUS" in text:
+    if _SEGFAULT_RE.search(text):
         score += 1
         signals.append((True, "process stopped on SIGSEGV/SIGBUS"))
 
@@ -158,6 +159,24 @@ def classify_lldb_stack_fault(lldb_text: str) -> StackFaultAnalysis:
                         "the mapped stack region — consistent with a failed "
                         "stack-growth page fault",
                     ))
+
+    if sp_region is not None:
+        sp_low, sp_high, sp_perms = sp_region
+        sp_unmapped = not any(c in sp_perms for c in "rwx")
+        if sp_unmapped and stack_pointer is not None and sp_low <= stack_pointer < sp_high:
+            score += 4
+            signals.append((
+                True,
+                "stack pointer is in an unmapped memory region — consistent with "
+                "a failed stack-growth page fault",
+            ))
+            if fault_address is not None and sp_low <= fault_address < sp_high:
+                score += 2
+                signals.append((
+                    True,
+                    "fault address is in the same unmapped memory region as the "
+                    "stack pointer",
+                ))
 
     top_frame = _TOP_FRAME_RE.search(text)
     if top_frame is not None and any(

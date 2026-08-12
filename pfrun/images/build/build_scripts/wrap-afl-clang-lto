@@ -10,8 +10,25 @@ TOOL_PATH = '/usr/bin'
 STATE_PATH = Path('/pfm/py/lto-wrap-state.json')
 NO_AFL_BINARIES = {'Programs/_freeze_module', '_bootstrap_python', 'Programs/_testembed'}
 
+# The interpreter/harness executables that "own" the finalized coverage-map ID.
+KNOWN_EXECUTABLES = {
+    'python.exe',
+    '/pfm/tools/fuzz_python', '/pfm/tools/fuzz_peg', '/pfm/tools/fuzz_script',
+    '/pfm/tools/fuzz_python.cmplog', '/pfm/tools/fuzz_peg.cmplog', '/pfm/tools/fuzz_script.cmplog',
+}
+
+# Prepended when building host-only bootstrap binaries with plain clang.
+THINLTO_FLAGS = [
+    '-flto=thin',
+    '-fuse-ld=lld',
+    '-O0',
+    '-Wl,--thinlto-jobs=all',
+    '-Wl,--thinlto-cache-dir=/pfm/cache/thinlto',
+]
+
 AFL_ALTERNATIVES = {
     'afl-clang-lto': 'clang',
+    'afl-clang-lto++': 'clang++',
 }
 
 CAPTURE_EDGES = object()
@@ -32,14 +49,13 @@ def save_state(state):
 
 
 def is_object_compile(cmd, args):
-    try:
-        c_index = args.index('-c')
-        o_index = args.index('-o')
-        if o_index > c_index and args[o_index + 1].endswith('.o'):
-            return True
-    except ValueError:
-        pass
-    return False
+    # A compile-to-object: `-c` present and the `-o` output ends in `.o`. Order
+    # is not fixed — CMake's TryCompile emits `-o … -c …`, CPython/meson the
+    # reverse — so match on membership, not relative position.
+    if '-c' not in args:
+        return False
+    output_file = get_output_file(args)
+    return output_file is not None and output_file.endswith('.o')
 
 
 def get_output_file(args):
@@ -52,50 +68,186 @@ def get_output_file(args):
     return None
 
 
+# --- Actions -----------------------------------------------------------------
+# Every wrapper invocation is classified into exactly one of these; a profile
+# that cannot classify an invocation raises, rather than silently building it
+# uninstrumented and degrading the fuzzer with no signal.
+
+def _current_start_id(env):
+    state = load_state()
+    if state.get('do_halt'):
+        print("LTO WRAP: HALTING", file=sys.stderr)
+        sys.exit(1)
+    return state.get('start_id', 0)
+
+
+def _instrument_so(env, start_id):
+    env['AFL_DEBUG'] = '1'
+    env['AFL_LLVM_LTO_STARTID'] = str(start_id)
+    print(f"\x1b[34mSTARTID={start_id}\x1b[0m", file=sys.stderr)
+    return CAPTURE_EDGES
+
+
+def _instrument_exe(env, start_id):
+    del env['AFL_LLVM_LTO_DONTWRITEID']
+    env['AFL_LLVM_LTO_STARTID'] = str(start_id)
+    print(f"\x1b[34mGENERATING EXECUTABLE STARTID={start_id}\x1b[0m", file=sys.stderr)
+    return None
+
+
+def _plain_clang(cmd, args, prepend=(), use_asan=False):
+    if prepend:
+        args[:0] = list(prepend)
+    if use_asan:
+        args.append('-fsanitize=address')
+    return AlternateBinary(AFL_ALTERNATIVES[cmd])
+
+
+# --- Profiles ----------------------------------------------------------------
+
+def cpython_profile(cmd, args, env, use_asan):
+    if is_object_compile(cmd, args):
+        return None
+
+    output_file = get_output_file(args)
+    if output_file in NO_AFL_BINARIES:
+        print(f"LTO WRAP: IGNORING for {output_file}", file=sys.stderr)
+        return _plain_clang(cmd, args, prepend=THINLTO_FLAGS, use_asan=use_asan)
+
+    start_id = _current_start_id(env)
+
+    if output_file is not None and output_file.endswith('.so'):
+        return _instrument_so(env, start_id)
+
+    if output_file in KNOWN_EXECUTABLES:
+        return _instrument_exe(env, start_id)
+
+    print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
+    raise ValueError("Unhandled scenario")
+
+
+def _is_linker_probe(args):
+    """meson detecting the linker via `cc -Wl,--version` (and friends)."""
+    return any(a in ('-Wl,--version', '-Wl,-v', '-Wl,--help') for a in args)
+
+
+def _is_probe(args, output_file):
+    """A no-codegen probe or throwaway helper a package build system emits."""
+    # Preprocessing / dependency generation with no object output.
+    if any(a == '-E' or a.startswith('-M') for a in args):
+        return True
+    # Compiler identity / capability queries.
+    probe_flags = {'--version', '-dumpversion', '-dumpfullversion', '-dumpmachine'}
+    if any(a in probe_flags or a.startswith('-print') for a in args):
+        return True
+    # A link whose product is not a fuzzed artifact (.so is handled earlier) and
+    # not an object file: meson/ninja feature-test executables and helper tools.
+    if output_file is not None and not output_file.endswith(('.o', '.so')):
+        return True
+    return False
+
+
+def _is_shared_link(args, output_file):
+    """A shared-library link, including CMake's versioned sonames (libfoo.so.1.2.3)."""
+    if '-shared' in args:
+        return True
+    if output_file is not None and re.search(r'\.so(\.\d+)*$', output_file):
+        return True
+    return False
+
+
+def _is_cmake_probe(args):
+    """CMake's throwaway compiler introspection, which must use plain clang:
+
+    * Compiler identification (`CompilerIdC`/`CompilerIdCXX`, `CMakeC*CompilerId`):
+      CMake reads embedded `INFO:compiler[...]` strings back out of the compiled
+      binary. afl-clang-lto emits LTO bitcode those strings can't be scraped from,
+      leaving CMAKE_<LANG>_COMPILER_ID empty ("compiler identification is unknown").
+    * Feature/ABI probes (CMakeTestCCompiler, Check* modules): `cmTC_*` targets under
+      `CMakeScratch/TryCompile-*`, where the compile and link halves must agree on
+      object format — bitcode from afl-clang-lto breaks the plain-clang link step
+      ("file format not recognized").
+
+    None of these artifacts are ever dlopen'd, so instrumenting them is pointless."""
+    markers = ('cmTC_', 'CMakeScratch/TryCompile', 'CompilerId')
+    return any(m in a for a in args for m in markers)
+
+
+def cmake_profile(cmd, args, env, use_asan):
+    # pyarrow's two-stage CMake build (Arrow C++ core + the Cython bindings). CMake
+    # emits the same probe families as meson plus versioned-soname shared links, so
+    # detect shared links (before the probe fallback) by -shared/soname, not a bare
+    # ".so" suffix.
+    if _is_cmake_probe(args):
+        # Route CMake's compiler-identification and try-compile probes through plain
+        # clang (checked before is_object_compile, which would otherwise hand the
+        # compile to afl-clang-lto and emit bitcode CMake can neither scrape ID
+        # strings from nor link).
+        return _plain_clang(cmd, args)
+
+    if is_object_compile(cmd, args):
+        return None
+
+    output_file = get_output_file(args)
+    if _is_shared_link(args, output_file):
+        # Every real dlopen'd artifact — libarrow.so.N, libparquet.so.N, pyarrow's
+        # _parquet/lib extensions — is instrumented.
+        return _instrument_so(env, _current_start_id(env))
+
+    if _is_linker_probe(args):
+        return _plain_clang(cmd, args, prepend=['-fuse-ld=lld'])
+
+    if _is_probe(args, output_file):
+        # CompilerId try-compiles, feature-test executables, cmTC_* helpers: all
+        # produce non-.o/.so outputs and route through plain clang.
+        return _plain_clang(cmd, args)
+
+    print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
+    raise ValueError("Unhandled cmake scenario")
+
+
+def meson_python_profile(cmd, args, env, use_asan):
+    if is_object_compile(cmd, args):
+        return None
+
+    output_file = get_output_file(args)
+    if output_file is not None and output_file.endswith('.so'):
+        # Matched before any probe/executable rule: every real dlopen'd artifact
+        # is a .so and is therefore always instrumented.
+        return _instrument_so(env, _current_start_id(env))
+
+    if _is_linker_probe(args):
+        # Route through plain clang forced to lld — the linker afl-clang-lto itself
+        # uses — so meson detects and configures for the same linker the real .so
+        # links will use.
+        return _plain_clang(cmd, args, prepend=['-fuse-ld=lld'])
+
+    if _is_probe(args, output_file):
+        return _plain_clang(cmd, args)
+
+    print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
+    raise ValueError("Unhandled meson_python scenario")
+
+
+PROFILES = {
+    'cpython': cpython_profile,
+    'meson_python': meson_python_profile,
+    'cmake': cmake_profile,
+}
+
+
 def prepare(cmd, args, env):
     use_asan = os.environ.get('AFL_USE_ASAN', '0') == '1'
     env['AFL_LLVM_LTO_DONTWRITEID'] = '1'
     args_hash = sha256((cmd + ' ' + ' '.join(args) + ' ' + str(env)).encode()).hexdigest()
     env['AFL_LLVM_DICT2FILE'] = f'/pfm/py/afl_dicts/{args_hash}.dict'
-    # if we have '-c' followed by '-o' and the -o file is a .o file, then we are compiling an object file and should not do anything special
-    if is_object_compile(cmd, args):
-        return
-    
-    output_file = get_output_file(args)
-    if output_file in NO_AFL_BINARIES:
-        print(f"LTO WRAP: IGNORING for {output_file}", file=sys.stderr)
-        args[:0] = [
-            '-flto=thin', 
-            '-fuse-ld=lld', 
-            '-O0', 
-            '-Wl,--thinlto-jobs=all', 
-            '-Wl,--thinlto-cache-dir=/pfm/cache/thinlto',
-        ]
-        if use_asan:
-            args.append('-fsanitize=address')
-        return AlternateBinary(AFL_ALTERNATIVES[cmd])
-    
-    state = load_state()
-    if state.get('do_halt'):
-        print(f"LTO WRAP: HALTING", file=sys.stderr)
-        sys.exit(1)
 
-    start_id = state.get('start_id', 0)
-
-    if output_file.endswith('.so'):
-        env['AFL_DEBUG'] = '1'
-        env['AFL_LLVM_LTO_STARTID'] = str(start_id)
-        print(f"\x1b[34mSTARTID={start_id}\x1b[0m", file=sys.stderr)
-        return CAPTURE_EDGES
-    
-    if output_file in {'python.exe', '/pfm/tools/fuzz_python', '/pfm/tools/fuzz_peg', '/pfm/tools/fuzz_script', '/pfm/tools/fuzz_python.cmplog', '/pfm/tools/fuzz_peg.cmplog', '/pfm/tools/fuzz_script.cmplog'}:
-        del env['AFL_LLVM_LTO_DONTWRITEID']
-        env['AFL_LLVM_LTO_STARTID'] = str(start_id)
-        print(f"\x1b[34mGENERATING EXECUTABLE STARTID={start_id}\x1b[0m", file=sys.stderr)
-        return
-    
-    print(f"LTO WRAP: {cmd}: {args}", file=sys.stderr)
-    raise ValueError(f"Unhandled scenario")
+    profile_name = os.environ.get('LTOWRAP_PROFILE', 'cpython')
+    try:
+        profile = PROFILES[profile_name]
+    except KeyError:
+        raise ValueError(f"Unknown LTOWRAP_PROFILE: {profile_name!r}")
+    return profile(cmd, args, env, use_asan)
 
 
 def run_capture_edges(cmd_abs, args, env):
@@ -113,7 +265,7 @@ def run_capture_edges(cmd_abs, args, env):
         raise RuntimeError(f"Could not find 'Instrumented N locations' in output: {result.stdout}, stderr: {result.stderr}")
     if len(matches) > 1:
         raise RuntimeError(f"Found multiple 'Instrumented N locations' in output: {result.stdout}, stderr: {result.stderr}")
-    
+
     num_edges = int(matches[-1])
     print(f"LTO WRAP: Captured {num_edges} edges", file=sys.stderr)
     state = load_state()

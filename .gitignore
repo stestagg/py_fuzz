@@ -44,3 +44,5 @@ pfrun/pfrun
 .pnpm-store/
 src/pfui/static/assets/
 .pyfuzz_project
+
+/scratch/

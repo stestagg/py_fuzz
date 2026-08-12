@@ -193,12 +193,13 @@ export function App() {
     setGroupSpecs(stored);
   }, [projectName]);
 
-  const analyzeAllActive = useMemo(
-    () => analyzingAll || tasks.some(
+  const analyzeAllTask = useMemo(
+    () => tasks.find(
       (task) => task.kind === "analyze-all" && task.project === projectName && task.status === "running",
-    ),
-    [analyzingAll, tasks, projectName],
+    ) ?? null,
+    [tasks, projectName],
   );
+  const analyzeAllActive = analyzingAll || analyzeAllTask !== null;
 
   const classifyAllActive = useMemo(
     () => classifyingAll || tasks.some(
@@ -369,6 +370,7 @@ export function App() {
             selected={selectedHash}
             loading={artifactLoading}
             analyzing={analyzeAllActive}
+            analyzingHash={analyzeAllTask?.phase ?? null}
             classifying={classifyAllActive}
             onSpecsChange={changeGroupSpecs}
             onSelect={(hash) => void selectArtifact(hash)}
